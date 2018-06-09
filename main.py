@@ -18,7 +18,7 @@ if not os.path.exists("data/"):
 
 # *~*~* Load identity *~*~*
 
-if not os.path.exists("data/pub.key"):
+if not os.path.exists("data/keys/pub.key"):
     print("Missing public key. Generating new keypair.")
 
     # WARNING: The chosen curve here is considered insecure by DJB
@@ -41,20 +41,20 @@ if not os.path.exists("data/pub.key"):
         format=serialization.PublicFormat.SubjectPublicKeyInfo
     )
 
-    fpriv = open("data/priv.key", 'wb')
+    fpriv = open("data/keys/priv.key", 'wb')
     fpriv.write(serialized_private)
     fpriv.close()
 
-    fpub = open("data/pub.key", 'wb')
+    fpub = open("data/keys/pub.key", 'wb')
     fpub.write(serialized_public)
     fpub.close()
 else:
-    private_key_data = open("data/priv.key", 'rb').read()
+    private_key_data = open("data/keys/priv.key", 'rb').read()
     private_key = serialization.load_pem_private_key(private_key_data,
                                                      None,
                                                      default_backend())
 
-    public_key_data = open("data/pub.key", 'rb').read()
+    public_key_data = open("data/keys/pub.key", 'rb').read()
     public_key = serialization.load_pem_public_key(public_key_data,
                                                    default_backend())
 
