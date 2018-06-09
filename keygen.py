@@ -12,7 +12,7 @@ def get_keys(node_dir=None):
         key_dir = node_dir + '/' + key_dir
 
     # checks if keys exist for this node, and if not, creates them
-    if not os.path.exists("%s/key_dirpub.key" % key_dir):
+    if not os.path.exists("%s/pub.key" % key_dir):
         print("Missing public key. Generating new keypair.")
 
         # WARNING: The chosen curve here is considered unsafe by DJB

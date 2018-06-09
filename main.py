@@ -1,54 +1,86 @@
+import argparse
+import json
 import os
 import socket
-
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.backends.interfaces import PEMSerializationBackend
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives import serialization, hashes
 
 import gevent
 
 import keygen
 import libbiblion
 
-# TODO chdir to node directory
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Biblion0 - ONLY FOR TESTING PURPOSES')
+    parser.add_argument('--config', type=str, help='config file')
+    parser.add_argument('--directory', type=str, help='directory for node')
+    args = parser.parse_args()
 
-# *~*~* Check configuration directory *~*~*
-if not os.path.exists("data/"):
-    os.mkdir("data")
-    os.mkdir("data/keys")
-    os.mkdir("data/pieces")
+    if not args.config or not args.directory:
+        print("Config and directory are required")
+        sys.exit(0)
 
-# *~*~* Load identity *~*~*
-pub, priv = keygen.get_keys()
+    global_config = json.loads(open(args.config).read())
 
-# *~*~* Connect to bootstrap node *~*~*
-# TODO: Save list of peers from last time
+    original_directory = os.getcwd()  # needed for unix socket routing
+    os.chdir(args.directory)
 
-#BOOTSTRAP_NODE = "127.0.0.1"
-BOOTSTRAP_NODE = ".testnet/node0"
-known_nodes = [BOOTSTRAP_NODE]
+    # *~*~* Check configuration directory *~*~*
+    if not os.path.exists("data/"):
+        print("Creating data directory")
+        os.mkdir("data")
+        os.mkdir("data/keys")
+        os.mkdir("data/pieces")
 
-node_connections = []
+    # *~*~* Load identity *~*~*
+    pub, priv = keygen.get_keys()
 
-for node in known_nodes:
-    socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    #socket = socket.connect(node, "42069")
-    node_connections.append(socket)
+    # *~*~* Connect to bootstrap node *~*~*
+    # TODO: Save list of peers from last time
 
-for conn in node_connections:
-    pass
-    #libbiblion.dht_join(conn)
-    # TODO handle
+    #BOOTSTRAP_NODE = (("127.0.0.1 put something real here",,,
+    BOOTSTRAP_NODE = (global_config['bootstrap_node_id'], global_config['bootstrap_node_address'])
+    known_nodes = [BOOTSTRAP_NODE]
 
-# TODO Get peers
-# TODO Contact library leaders (if member of library)
-# TODO Update blockchain state
+    node_connections = []  # XXX unused currently
+
+    own_id = libbiblion.pub_to_nodeid(pub)
+    libbiblion.libbiblion_init(pub, priv)
+
+    # TODO: generate self node id on startup. ensure don't add self as dht neighbor
+
+    for node in known_nodes:
+        if node[0] == own_id:
+            # don't add self on DHT
+            continue
+        libbiblion.connect(original_directory + '/' + node[1])
+
+    for conn in node_connections:
+        pass
+        #libbiblion.dht_join(conn)
+        # TODO handle
+
+    # TODO listen for new connections
+    # fix this...
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        if os.path.exists(".socket"):
+            os.remove(".socket")
+        sock.bind(".socket")
+        sock.listen(50)
+
+        print("Now listening on domain socket")
+
+        while True:
+            conn, addr = sock.accept()
+            libbiblion.handle_connection(conn)
 
 
-# *~*~* Check database state *~*~*
+        # TODO Get peers
+        # TODO Contact library leaders (if member of library)
+        # TODO Update blockchain state
 
-# TODO Load extant piece data
-# TODO Request data updates from library leaders
 
-# TODO Publish data possession to DHT peers
+        # *~*~* Check database state *~*~*
+
+        # TODO Load extant piece data
+        # TODO Request data updates from library leaders
+
+        # TODO Publish data possession to DHT peers
