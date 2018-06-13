@@ -1,6 +1,9 @@
+from gevent.monkey import patch_all; patch_all();
+
 import argparse
 import json
 import os
+import sys
 import socket
 
 import gevent
@@ -43,44 +46,30 @@ if __name__ == '__main__':
     node_connections = []  # XXX unused currently
 
     own_id = libbiblion.pub_to_nodeid(pub)
+    print("STARTING BIBLION. NODE_ID", own_id)
     libbiblion.libbiblion_init(pub, priv)
 
     # TODO: generate self node id on startup. ensure don't add self as dht neighbor
 
     for node in known_nodes:
         if node[0] == own_id:
+            # XXX need a stronger check
             # don't add self on DHT
             continue
         libbiblion.connect(original_directory + '/' + node[1])
 
-    for conn in node_connections:
-        pass
-        #libbiblion.dht_join(conn)
-        # TODO handle
+    gevent.spawn(libbiblion.listen_for_connections)
 
-    # TODO listen for new connections
-    # fix this...
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        if os.path.exists(".socket"):
-            os.remove(".socket")
-        sock.bind(".socket")
-        sock.listen(50)
+    gevent.wait()
 
-        print("Now listening on domain socket")
-
-        while True:
-            conn, addr = sock.accept()
-            libbiblion.handle_connection(conn)
+    # TODO Get peers / Initialize DHT
+    # TODO Update blockchain state
+    # TODO Contact library leaders (if member of library)
 
 
-        # TODO Get peers
-        # TODO Contact library leaders (if member of library)
-        # TODO Update blockchain state
+    # *~*~* Check database state *~*~*
 
+    # TODO Load extant piece data
+    # TODO Request data updates from library leaders
 
-        # *~*~* Check database state *~*~*
-
-        # TODO Load extant piece data
-        # TODO Request data updates from library leaders
-
-        # TODO Publish data possession to DHT peers
+    # TODO Publish data possession to DHT peers

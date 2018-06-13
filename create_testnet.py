@@ -15,7 +15,7 @@ if os.path.exists(".testnet"):
 
 os.mkdir(".testnet")
 
-NODES = 2
+NODES = 3
 
 global_config = {}
 
