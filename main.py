@@ -13,7 +13,9 @@ import gevent
 import keygen
 import libbiblion
 
+# *~*~* Shutdown-signal handlers *~*~*
 def async_suicide():
+    # TODO this should wait until state is clean force exit after timeout
     print("Waiting 2 seconds then exiting")
     time.sleep(2)
     sys.exit(0)
@@ -24,69 +26,72 @@ def signal_handler(signal, frame):
         gevent.spawn(async_suicide)
 signal.signal(signal.SIGINT, signal_handler)
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Biblion0 - ONLY FOR TESTING PURPOSES')
-    parser.add_argument('--config', type=str, help='config file')
-    parser.add_argument('--directory', type=str, help='directory for node')
-    args = parser.parse_args()
 
-    if not args.config or not args.directory:
-        print("Config and directory are required")
-        sys.exit(0)
+# *~*~* Get arguments *~*~*
+if __name__ != '__main__':
+    print("Please run main.py on its own")
+    sys.exit(0)
 
-    global_config = json.loads(open(args.config).read())
+parser = argparse.ArgumentParser(description='Biblion0 - ONLY FOR TESTING PURPOSES')
+parser.add_argument('--config', type=str, help='config file')
+parser.add_argument('--directory', type=str, help='directory for node')
+args = parser.parse_args()
 
-    original_directory = os.getcwd()  # needed for unix socket routing
-    os.chdir(args.directory)
-    node_number = int(args.directory[-2:-1])
+if not args.config or not args.directory:
+    print("Config and directory are required")
+    sys.exit(0)
 
-    # *~*~* Check configuration directory *~*~*
-    if not os.path.exists("data/"):
-        print("Creating data directory")
-        os.mkdir("data")
-        os.mkdir("data/keys")
-        os.mkdir("data/pieces")
+global_config = json.loads(open(args.config).read())
 
-    # *~*~* Load identity *~*~*
-    pub, priv = keygen.get_keys()
+original_directory = os.getcwd()  # needed for unix socket routing
+os.chdir(args.directory)
+node_number = int(args.directory[-2:-1])
 
-    # *~*~* Connect to bootstrap node *~*~*
-    # TODO: Save list of peers from last time
+# *~*~* Check configuration directory *~*~*
+if not os.path.exists("data/"):
+    print("Creating data directory")
+    os.mkdir("data")
+    os.mkdir("data/keys")
+    os.mkdir("data/pieces")
 
-    #BOOTSTRAP_NODE = (("127.0.0.1 put something real here",,,
-    BOOTSTRAP_NODE = (global_config['bootstrap_node_id'], global_config['bootstrap_node_address'])
-    known_nodes = [BOOTSTRAP_NODE]
+# *~*~* Load identity *~*~*
+pub, priv = keygen.get_keys()
 
-    node_connections = []  # XXX unused currently
+# *~*~* Connect to bootstrap node *~*~*
+# TODO: Save list of peers from last time
 
-    own_id = libbiblion.pub_to_nodeid(pub)
-    print("STARTING BIBLION. NODE_ID", own_id)
-    libbiblion.libbiblion_init(pub, priv)
+#BOOTSTRAP_NODE = (("127.0.0.1 put something real here",,,
+BOOTSTRAP_NODE = (global_config['bootstrap_node_id'], global_config['bootstrap_node_address'])
+known_nodes = [BOOTSTRAP_NODE]
 
-    # TODO: generate self node id on startup. ensure don't add self as dht neighbor
+node_connections = []  # XXX unused currently
 
-    for node in known_nodes:
-        if node[0] == own_id:
-            # XXX need a stronger check
-            # don't add self on DHT
-            continue
-        libbiblion.connect(original_directory + '/' + node[1])
+own_id = libbiblion.pub_to_nodeid(pub)
+print("STARTING BIBLION. NODE_ID", own_id)
+libbiblion.libbiblion_init(pub, priv)
 
-    gevent.spawn(libbiblion.listen_for_connections)
-    gevent.spawn(libbiblion.start_json_rpc, node_number)
+# TODO: generate self node id on startup. ensure don't add self as dht neighbor
 
-    gevent.wait()
+for node in known_nodes:
+    if node[0] == own_id:
+        # XXX need a stronger check
+        # don't add self on DHT
+        continue
+    libbiblion.connect(original_directory + '/' + node[1])
 
-    # TODO Get peers / Initialize DHT
-    # TODO Update blockchain state
-    # TODO Contact library leaders (if member of library)
+gevent.spawn(libbiblion.listen_for_connections)
+gevent.spawn(libbiblion.start_json_rpc, node_number)
+
+gevent.wait()  # wait forever
+
+# TODO Get peers / Initialize DHT
+# TODO Update blockchain state
+# TODO Contact library leaders (if member of library)
 
 
-    # *~*~* Check database state *~*~*
+# *~*~* Check database state *~*~*
 
-    # TODO Load extant piece data
-    # TODO Request data updates from library leaders
+# TODO Load extant piece data
+# TODO Request data updates from library leaders
 
-    # TODO Publish data possession to DHT peers
-
-    # TODO spawn RPC api
+# TODO Publish data possession to DHT peers

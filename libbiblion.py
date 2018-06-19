@@ -40,6 +40,10 @@ public_key = None
 private_key = None
 connections = {}
 
+KADEMLIA_K = 20  # k-bucket size. should probably be higher for global DHT
+kademlia_state = {'k_buckets': {}, 'data_store': {}}
+for i in range(256): kademlia_state['k_buckets'][i] = []
+
 httpd_instance = None
 
 def listen_for_connections():
@@ -189,9 +193,84 @@ def connect(node):
 def generate_request(command, data):
     pass
 
+def _kademlia_nearest_bucket(n):
+    # Returns the index of the most significant bit in the bytestring
+    # Returns None if the bytestring doesn't belong in a bucket (it's the same as our nodeid)
+    # XXX We should be able to find the nearest bucket faster using deBrujin sequences
+    # http://supertech.csail.mit.edu/papers/debruijn.pdf
+    for i, b in enumerate(n):
+        e = 7
+        while e > 0:
+            if (b >> e) & 1:
+                return ((31-i)*8) + e
+            e -= 1
+
+def _kademlia_nearest_nodes(n):
+    # keep returning neighbors near n until there are none left
+
+    nearest_bucket = _kademlia_nearest_bucket(n)
+    if nearest_bucket is None:
+        print("requested nearest nodes to our own id")
+        nearest_bucket = 0
+
+    buckets = list(range(256))
+    while buckets:
+        for node in kademlia_state['k_buckets'][nearest_bucket]:
+            yield node
+        nearest_bucket = (nearest_bucket+1) % 256
+        buckets.remove(nearest_bucket)
+
+def _kademlia_add_node(request):
+    # Adds a node to its kbucket.
+    node_id = request['node_id']
+    node_id_bin = base64.b64decode(node_id)
+    ip = request['ip']
+    # XXX port
+
+    # XXX TODO If the bucket is full, we evict the least recently seen node if it fails to reply to ping
+    # TODO verify the node is connectable
+
+    nearest_bucket = _kademlia_nearest_bucket(node_id_bin)
+    kademlia_state['k_buckets'][nearest_bucket].append((node_id, ip))
+
+def kademlia_find_node(request):
+    """
+    Returns the k nearest nodes to the requested node
+    """
+    req_node = request['node_id']
+    req_node_bin = base64.b64decode(req_node)
+    local_nodeid_bin = base64.b64decode(pub_to_nodeid(public_key))
+
+    xor_result = [a ^ b for a, b in zip(req_node_bin, local_nodeid_bin)]
+
+    results = []
+    nearest_nodes = _kademlia_nearest_nodes(xor_result)
+    for node in nearest_nodes:
+        results.append(node)
+        if len(results) >= KADEMLIA_K:
+            break
+    return results
+
+
 def initialize_dht(socket):
     # initialize global DHT
     # call find_node on self, adding neighbors until buckets are full or we run out of nodes to query
+
+    """
+    To join the network, a node u must have a contact to an already
+    participating node w. u inserts w into the appropriate k-bucket. u then
+    performs a node lookup for its own node ID. Finally, u refreshes all
+    k-buckets further away than its closest neighbor. During the refreshes,
+    u both populates its own k-buckets and inserts itself into other nodes’
+    k-buckets as necessary.
+    """
+
+    """
+    Announcements will have to signed and timestamped. This way we can filter out
+    outdated information in a reliable verifiable way, and ensure that announcements
+    are always authenticated
+    """
+
     pass
 
 class BiblionRPCRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -212,14 +291,18 @@ class BiblionRPCRequestHandler(http.server.BaseHTTPRequestHandler):
                 if parsed_data['command'] == 'print_dht':
                     response_data += "Current Kademlia DHT state:\n"
                     response_data += "Our node id: %s\n" % pub_to_nodeid(public_key)
+                    response_data += json.dumps(kademlia_state)
                 elif parsed_data['command'] == 'reset_dht':
                     pass
                 elif parsed_data['command'] == 'dht_store':
                     pass
                 elif parsed_data['command'] == 'dht_find_node':
-                    pass
+                    response_data += json.dumps(kademlia_find_node(parsed_data))
                 elif parsed_data['command'] == 'dht_find_value':
                     pass
+                elif parsed_data['command'] == 'DEBUG__dht_add':
+                    _kademlia_add_node(parsed_data)
+                    response_data += 'SUCCESS'
 
         self.send_response(200)
         self.end_headers()
@@ -244,4 +327,5 @@ def start_json_rpc(node_number):
         except:
             print("Exception occurred in HTTP server")
         print("Cleaning up JSON-RPC TCPServer")
+
     httpd_instance = None
