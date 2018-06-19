@@ -5,11 +5,24 @@ import json
 import os
 import sys
 import socket
+import signal
+import time
 
 import gevent
 
 import keygen
 import libbiblion
+
+def async_suicide():
+    print("Waiting 2 seconds then exiting")
+    time.sleep(2)
+    sys.exit(0)
+
+def signal_handler(signal, frame):
+        print('Shutting down...')
+        gevent.spawn(libbiblion.shutdown_json_rpc)
+        gevent.spawn(async_suicide)
+signal.signal(signal.SIGINT, signal_handler)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Biblion0 - ONLY FOR TESTING PURPOSES')
@@ -25,6 +38,7 @@ if __name__ == '__main__':
 
     original_directory = os.getcwd()  # needed for unix socket routing
     os.chdir(args.directory)
+    node_number = int(args.directory[-2:-1])
 
     # *~*~* Check configuration directory *~*~*
     if not os.path.exists("data/"):
@@ -59,6 +73,7 @@ if __name__ == '__main__':
         libbiblion.connect(original_directory + '/' + node[1])
 
     gevent.spawn(libbiblion.listen_for_connections)
+    gevent.spawn(libbiblion.start_json_rpc, node_number)
 
     gevent.wait()
 
@@ -73,3 +88,5 @@ if __name__ == '__main__':
     # TODO Request data updates from library leaders
 
     # TODO Publish data possession to DHT peers
+
+    # TODO spawn RPC api

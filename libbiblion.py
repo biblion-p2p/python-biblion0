@@ -5,7 +5,11 @@ import socket
 import random
 import os
 
+import http.server
+import socketserver
+
 import gevent
+from flask import Flask
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization, hashes
@@ -36,6 +40,7 @@ public_key = None
 private_key = None
 connections = {}
 
+httpd_instance = None
 
 def listen_for_connections():
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
@@ -188,3 +193,55 @@ def initialize_dht(socket):
     # initialize global DHT
     # call find_node on self, adding neighbors until buckets are full or we run out of nodes to query
     pass
+
+class BiblionRPCRequestHandler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        if self.path != '/rpc':
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(b"Only use /rpc please!\n")
+            return
+
+        response_data = ""
+        if 'content-length' in self.headers:
+            input_length = self.headers.get('content-length')
+            input_data = self.rfile.read(int(input_length))
+            parsed_data = json.loads(input_data)
+
+            if 'command' in parsed_data:
+                if parsed_data['command'] == 'print_dht':
+                    response_data += "Current Kademlia DHT state:\n"
+                    response_data += "Our node id: %s\n" % pub_to_nodeid(public_key)
+                elif parsed_data['command'] == 'reset_dht':
+                    pass
+                elif parsed_data['command'] == 'dht_store':
+                    pass
+                elif parsed_data['command'] == 'dht_find_node':
+                    pass
+                elif parsed_data['command'] == 'dht_find_value':
+                    pass
+
+        self.send_response(200)
+        self.end_headers()
+
+        if response_data:
+            self.wfile.write(response_data.encode('utf-8'))
+
+def shutdown_json_rpc():
+    if httpd_instance:
+        print("Shutting down JSON-RPC server")
+        httpd_instance.shutdown()
+
+def start_json_rpc(node_number):
+    global httpd_instance
+    port = 8000 + node_number
+
+    with socketserver.TCPServer(("", port), BiblionRPCRequestHandler) as httpd:
+        httpd_instance = httpd
+        print("serving at port", port)
+        try:
+            httpd.serve_forever()
+        except:
+            print("Exception occurred in HTTP server")
+        print("Cleaning up JSON-RPC TCPServer")
+    httpd_instance = None
