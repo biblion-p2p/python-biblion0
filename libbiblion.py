@@ -47,7 +47,7 @@ KADEMLIA_K = 16  # k-bucket size
 KADEMLIA_D = KADEMLIA_K / 2  # number of disjoint paths. Similar to `alpha` in original kademlia paper
 KADEMLIA_SIBLENGTH = KADEMLIA_K * 7  # number of entries in the sibling list
 # sibling list should have size 7k (from S/Kademlia 4.2)
-kademlia_state = {'trie': {'children': {}, 'leaf': None},
+kademlia_state = {'trie': {'children': {}, 'leaf': None, 'count': 0},
                   'active_nodes': {},  # map of active nodes for quick node lookup
                   'k_buckets': {},  # accounting structure for managing far away nodes
                   'siblings': [],  # accounting for close nodes. We store 7k neighbors to ensure we know our neighborhood
@@ -254,27 +254,39 @@ def _kademlia_nearest_nodes(n):
         nearest_bucket = (nearest_bucket+1) % 256
         buckets.remove(nearest_bucket)
 
+def _debug_k_trie_get():
+    return kademlia_state['trie']
 
 def _k_trie_remove_node(node_id):
     # Remove a node from the trie
-    # TODO Update counts as needed. Just subtract one as we descend. WARNING: need to ensure node exists in trie
 
-    #trie_root = kademlia_state['trie']
-    trie_root = global_trie
+    # TODO XXX None of this code is thread safe lol
+
+    # TODO XXX this check should be put into whatever code calls this function
+    #if node_id not in kademlia_state['active_nodes']:
+    #    return
+
+    trie_root = kademlia_state['trie']
+
+    if trie_root['leaf'] and trie_root['leaf']['node_id'] != node_id:
+        print("Trie does not have requested node")
+        return
+    elif not trie_root['leaf'] and not trie_root['children']:
+        print("Empty trie")
+        return
 
     node_id_index = 0
     current_node = trie_root
     last_parent = None
-
-    while current_node['leaf'] is None or current_node['leaf']['node_id'] != node_id:
-        # WARNING: this assumes the leaf is in the trie
-        if current_node['children']:
-            while node_id_index < len(current_node['prefix']) and current_node['prefix'][node_id_index] == node_id[node_id_index]:
-                node_id_index += 1
-
-            if node_id_index == len(current_node['prefix']):
-                last_parent = current_node
-                current_node = current_node['children'][node_id[node_id_index]]
+    while current_node['leaf'] is None:
+        while node_id_index < len(current_node['prefix']):
+            if current_node['prefix'][node_id_index] != node_id[node_id_index]:
+                print("Node could not be found")
+                return
+            node_id_index += 1
+        last_parent = current_node
+        current_node['count'] -= 1
+        current_node = current_node['children'][node_id[node_id_index]]
 
     if last_parent:
         other_branch = '0' if node_id[node_id_index] == '1' else '1'
@@ -283,16 +295,17 @@ def _k_trie_remove_node(node_id):
             last_parent['children'] = copy(old_branch['children'])
             last_parent['prefix'] = old_branch['prefix']
         else:
+            last_parent['leaf'] = old_branch['leaf']
             last_parent['children'] = {}
-            last_parent['leaf'] = copy(old_branch['leaf'])
+        last_parent['count'] = old_branch['count']
         del old_branch
     else:  # root leaf
         current_node['leaf'] = None
+        current_node['count'] = 0
 
 
 def _k_trie_add_node(node_id):
-    #trie_root = kademlia_state['trie']
-    trie_root = global_trie
+    trie_root = kademlia_state['trie']
 
     node_id_index = 0
     current_node = trie_root
@@ -304,17 +317,24 @@ def _k_trie_add_node(node_id):
 
             if node_id_index == len(current_node['prefix']):
                 # the prefix matches. iterate down.
+                current_node['count'] += 1
                 current_node = current_node['children'][node_id[node_id_index]]
             else:
                 # new to add new branch here
-                branched_node = {'children': copy(current_node['children']), 'prefix': current_node['prefix'], 'leaf': None}
-                current_node['children'][node_id[node_id_index]] = {'leaf': {'node_id': node_id}, 'children': {}}
+                branched_node = {'children': copy(current_node['children']),
+                                 'prefix': current_node['prefix'],
+                                 'leaf': None,
+                                 'count': current_node['count']}
+                current_node['count'] += 1
+                current_node['children'][node_id[node_id_index]] = {'leaf': {'node_id': node_id},
+                                                                    'children': {},
+                                                                    'count': 1}
                 current_node['children'][current_node['prefix'][node_id_index]] = branched_node
                 current_node['prefix'] = current_node['prefix'][:node_id_index]  # truncate the prefix to represent the new branch
                 return
         elif current_node['leaf'] and current_node['leaf']['node_id'] == node_id:
             # This ID is already in the trie. Give up.
-            # TODO Maybe this should be where we update the record and kbuckets?
+            # TODO Maybe this should be where we update the record and kbuckets? Hmm, probably that should be in other code
             return
         elif current_node['leaf']:
             # We need to branch the trie at this point. We find the first
@@ -327,45 +347,93 @@ def _k_trie_add_node(node_id):
 
             # Move current leaf into branch
             current_node['prefix'] = node_id[:node_id_index]
-            current_node['children'][current_node['leaf']['node_id'][node_id_index]] = {'leaf': current_node['leaf'], 'children': {}}
+            current_node['children'][current_node['leaf']['node_id'][node_id_index]] = {'leaf': current_node['leaf'],
+                                                                                        'children': {},
+                                                                                        'count': 1}
+            current_node['count'] += 1
             current_node['leaf'] = None
 
             # Add new node as child
-            current_node['children'][node_id[node_id_index]] =  {'leaf': {'node_id': node_id}, 'children': {}}
+            current_node['children'][node_id[node_id_index]] =  {'leaf': {'node_id': node_id},
+                                                                 'children': {},
+                                                                 'count': 1}
             return
         else:  # fresh trie
             current_node['leaf'] = {'node_id': node_id}
+            current_node['count'] = 1
             return
 
 
 def _k_trie_collect_leaves(node):
-    # Returns all leaves in numerical order from the given trie node
-    pass
+    # in the real implementation this should probably be made iterative
+    if node['leaf']:
+        return [node['leaf']]
+    else:
+        return _k_trie_collect_leaves(node['children']['0']) + _k_trie_collect_leaves(node['children']['1'])
 
-def _k_trie_get_closest(node):
+def _k_trie_get_closest(node_id):
     trie_root = kademlia_state['trie']
     results = []
 
-    path = []  # this will need to store tuples of the node in the trie as well as the branch taken
+    if trie_root['count'] == 0:
+        # empty trie. just return
+        return results
 
-    # iterate through trie
-    # When you get as deep as you can to fill the results list, add all the results
-    # if there were not enough nodes, backtrack and take nodes from other path, recursing as needed
-    # keep adding results until we get get K results
+    if trie_root['leaf']:
+        # TODO XXX this can be replaced by the optimization below after testing
+        return [trie_root['leaf']]
+
+    # optimization: just return all nodes if less than k. TODO only enable after testing the normal way.
+    # if len(kademlia_state['active_nodes']) <= KADEMLIA_K:
+    #     return list(kademlia_state['active_nodes'].values())
+
+    path = []
+    used_prefixes = []
 
     current_node = trie_root
     while True:
-        if len(results) + current_node['count'] <= KADEMLIA_K:
+        if len(results) == KADEMLIA_K:
+            break
+
+        if current_node['prefix'] not in used_prefixes and len(results) + current_node['count'] <= KADEMLIA_K:
             # Add all the nodes at this branch of the trie
-            results.append(_k_trie_collect_leaves(nodes))
+            results.append(_k_trie_collect_leaves(current_node))
+            used_prefixes.append(current_node['prefix'])
+            if path:
+                current_node = path.pop()
+                continue
+            else:
+                break
 
         if current_node['children']:
-            # The node is a branch node, iterate into branch
-            while node_id_index < len(current_node['prefix']) and current_node['prefix'][node_id_index] == node_id[node_id_index]:
-                node_id_index += 1
-            if node_id_index == len(current_node['prefix']):
-                path.append(current_node)
-                current_node = current_node['children'][node_id[node_id_index]]
+            # The node is a branch node, choose the best branch to iterate to
+            branch_bit = node_id[len(current_node['prefix'])]
+            n_branch_bit = '0' if branch_bit == '1' else '1'
+            if current_node['prefix'] + branch_bit not in used_prefixes:
+                next_node = current_node['children'][branch_bit]
+                if next_node['leaf']:
+                    results.append(next_node['leaf'])
+                    used_prefixes.append(current_node['prefix'] + branch_bit)
+                    continue
+                else:  # branch
+                    path.append(current_node)
+                    current_node = next_node
+            elif current_node['prefix'] + n_branch_bit not in used_prefixes:
+                next_node = current_node['children'][n_branch_bit]
+                if next_node['leaf']:
+                    results.append(next_node['leaf'])
+                    used_prefixes.append(current_node['prefix'] + n_branch_bit)
+                    continue
+                else:  # branch
+                    path.append(current_node)
+                    current_node = next_node
+            else:
+                if path:
+                    current_node = path.pop()
+                else:
+                    break
+
+    return results
 
 
 def _kademlia_add_node(request):
