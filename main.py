@@ -64,8 +64,6 @@ pub, priv = keygen.get_keys()
 BOOTSTRAP_NODE = (global_config['bootstrap_node_id'], global_config['bootstrap_node_address'])
 known_nodes = [BOOTSTRAP_NODE]
 
-node_connections = []  # XXX unused currently
-
 own_id = libbiblion.pub_to_nodeid(pub)
 print("STARTING BIBLION. NODE_ID", own_id)
 libbiblion.libbiblion_init(pub, priv)
@@ -79,14 +77,17 @@ for node in known_nodes:
         continue
     libbiblion.connect(original_directory + '/' + node[1])
 
+# TODO Start UDP listener for DHT messages
 gevent.spawn(libbiblion.listen_for_connections)
 gevent.spawn(libbiblion.start_json_rpc, node_number)
 
 gevent.wait()  # wait forever
 
 # TODO Get peers / Initialize DHT
-# TODO Update blockchain state
 # TODO Contact library leaders (if member of library)
+
+ #TODO LATER
+# TODO Update blockchain state
 
 
 # *~*~* Check database state *~*~*
