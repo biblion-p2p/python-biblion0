@@ -18,11 +18,14 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 
 
-# node commands:
+# UDP commands:
 # ping
 # kademlia_find_node
 # kademlia_find_value
 # kademlia_publish
+
+# TCP/connection commands:
+# ping
 # shelf_publish_data
 # lynx_request_join
 # lynx_accept_join
@@ -50,7 +53,7 @@ KADEMLIA_SIBLENGTH = KADEMLIA_K * 7  # number of entries in the sibling list
 kademlia_state = {'trie': {'children': {}, 'leaf': None, 'count': 0},
                   'active_nodes': {},  # map of active nodes for quick node lookup
                   'k_buckets': {},  # accounting structure for managing far away nodes
-                  'siblings': [],  # accounting for close nodes. We store 7k neighbors to ensure we know our neighborhood
+                  'siblings': {'nodes': [], 'max': None},  # accounting for close nodes. We store 7k neighbors to ensure we know our neighborhood
                   'data_store': {}}  # values stored in our node. # XXX needs size constraint.
 for i in range(256): kademlia_state['k_buckets'][i] = []
 
@@ -239,32 +242,19 @@ def _kademlia_nearest_bucket(n):
                 return ((31-i)*8) + e
             e -= 1
 
-def _kademlia_nearest_nodes(n):
+def _kademlia_nearest_nodes(node_id):
     # keep returning neighbors near n until there are none left
-
-    nearest_bucket = _kademlia_nearest_bucket(n)
-    if nearest_bucket is None:
-        print("requested nearest nodes to our own id")
-        nearest_bucket = 0
-
-    buckets = list(range(256))
-    while buckets:
-        for node in kademlia_state['k_buckets'][nearest_bucket]:
-            yield node
-        nearest_bucket = (nearest_bucket+1) % 256
-        buckets.remove(nearest_bucket)
-
-def _debug_k_trie_get():
-    return kademlia_state['trie']
+    node_id_bytes = base64.b64decode(node_id)
+    node_id_bin = _util_convert_bytestring_to_bits(node_id)
+    # optimization: just return all nodes if less than k. TODO only enable after testing the normal way.
+    # if len(kademlia_state['active_nodes']) <= KADEMLIA_K:
+    #     return list(kademlia_state['active_nodes'].values())
+    return _k_trie_get_closest(node_id_bin)
 
 def _k_trie_remove_node(node_id):
     # Remove a node from the trie
 
     # TODO XXX None of this code is thread safe lol
-
-    # TODO XXX this check should be put into whatever code calls this function
-    #if node_id not in kademlia_state['active_nodes']:
-    #    return
 
     trie_root = kademlia_state['trie']
 
@@ -292,7 +282,7 @@ def _k_trie_remove_node(node_id):
         other_branch = '0' if node_id[node_id_index] == '1' else '1'
         old_branch = last_parent['children'][other_branch]
         if old_branch['children']:
-            last_parent['children'] = copy(old_branch['children'])
+            last_parent['children'] = old_branch['children']
             last_parent['prefix'] = old_branch['prefix']
         else:
             last_parent['leaf'] = old_branch['leaf']
@@ -304,8 +294,9 @@ def _k_trie_remove_node(node_id):
         current_node['count'] = 0
 
 
-def _k_trie_add_node(node_id):
+def _k_trie_add_node(node_object):
     trie_root = kademlia_state['trie']
+    node_id = node_object['node_id']
 
     node_id_index = 0
     current_node = trie_root
@@ -321,12 +312,12 @@ def _k_trie_add_node(node_id):
                 current_node = current_node['children'][node_id[node_id_index]]
             else:
                 # new to add new branch here
-                branched_node = {'children': copy(current_node['children']),
+                branched_node = {'children': current_node['children'],
                                  'prefix': current_node['prefix'],
                                  'leaf': None,
                                  'count': current_node['count']}
                 current_node['count'] += 1
-                current_node['children'][node_id[node_id_index]] = {'leaf': {'node_id': node_id},
+                current_node['children'][node_id[node_id_index]] = {'leaf': node_object,
                                                                     'children': {},
                                                                     'count': 1}
                 current_node['children'][current_node['prefix'][node_id_index]] = branched_node
@@ -354,12 +345,12 @@ def _k_trie_add_node(node_id):
             current_node['leaf'] = None
 
             # Add new node as child
-            current_node['children'][node_id[node_id_index]] =  {'leaf': {'node_id': node_id},
+            current_node['children'][node_id[node_id_index]] =  {'leaf': node_object,
                                                                  'children': {},
                                                                  'count': 1}
             return
         else:  # fresh trie
-            current_node['leaf'] = {'node_id': node_id}
+            current_node['leaf'] = node_object
             current_node['count'] = 1
             return
 
@@ -380,12 +371,7 @@ def _k_trie_get_closest(node_id):
         return results
 
     if trie_root['leaf']:
-        # TODO XXX this can be replaced by the optimization below after testing
         return [trie_root['leaf']]
-
-    # optimization: just return all nodes if less than k. TODO only enable after testing the normal way.
-    # if len(kademlia_state['active_nodes']) <= KADEMLIA_K:
-    #     return list(kademlia_state['active_nodes'].values())
 
     path = []
     used_prefixes = []
@@ -397,7 +383,7 @@ def _k_trie_get_closest(node_id):
 
         if current_node['prefix'] not in used_prefixes and len(results) + current_node['count'] <= KADEMLIA_K:
             # Add all the nodes at this branch of the trie
-            results.append(_k_trie_collect_leaves(current_node))
+            results.extend(_k_trie_collect_leaves(current_node))
             used_prefixes.append(current_node['prefix'])
             if path:
                 current_node = path.pop()
@@ -435,33 +421,93 @@ def _k_trie_get_closest(node_id):
 
     return results
 
+def _kademlia_remove_node(node):
+    # removes the node from its kbucket and from the trie
+    if node['is_sibling']:
+        kademlia_state['siblings'].remove(node)
+    elif node['kbucket']:
+        # remove it from the kbucket
+        pass
+
+    # TODO
+    # remove the node from the active nodes list
+    # remove the node from the trie
+
+def _kademlia_queue_add(node):
+    # TODO Queues a node for addition to our Kademlia state
+    pass
+
 
 def _kademlia_add_node(request):
     """
-    Adds a node record to our local k-buckets. Only call this after receiving
-    a reply or request that indicates this node is alive.
-    """
-    # Adds a node to its kbucket.
-    node_id = request['node_id']
-    node_id_bin = base64.b64decode(node_id)
-    ip = request['ip']
-    # XXX port
-
-    # TODO add the node to the trie
-
-    """
     When we see a node in a response, we check if we have it in our global datastore by checking a global hashmap.
-
     If so, we update the node’s last-seen timestamp (using the reference from the hash map). If it’s in a K-bucket, we move it to the front of the k-bucket.
-
     If not, we check if it belongs in the sibling list. If not, we check its target k-bucket. We verify whether the other nodes in the list are live if needed.
     """
+    # TODO XXX make this thread safe
+    node_id = request['node_id']
+    node_id_bin = base64.b64decode(node_id)
+    node_id_bits = _util_convert_bytestring_to_bits(node_id_bin)
+    ip = request['ip']
+    port = request['port']
+    signature = request['signature']
+
+    if node_id in kademlia_state['active_nodes']:
+        # TODO should be moved to end of list?
+        kademlia_state['active_nodes'][node_id]['last_seen_timestamp'] = time.time()
+        return
+
+    own_id = pub_to_nodeid(public_key)
+    own_id_bin = base64.b64decode(own_id)
+    xor_distance = [a^b for a, b in zip(own_id_bin, node_id_bin)]
+    xor_distance_int = int.from_bytes(xor_distance, byte_order="big")
+
+    new_node = {
+        'node_id': node_id,
+        'ip': ip,
+        'port': port,
+        'last_seen_timestamp': time.time()
+    }
+
+    if len(kademlia_state['siblings']['nodes']) < KADEMLIA_SIBLENGTH:
+        kademlia_state['siblings']['nodes'].append(new_node)
+        if xor_distance_int > kademlia_state['siblings']['max']:
+            kademlia_state['siblings']['max'] = xor_distance
+
+    if xor_distance_int < kademlia_state['siblings']['max']:
+        # XXX O(n) performance sink :(
+        for node in kademlia_state['siblings']:
+            s_node_id = node['node_id']
+            s_node_id_bin = base64.b64decode(s_node_id)
+            s_xor_distance = [a^b for a, b in zip(own_id_bin, s_node_id_bin)]
+            s_xor_distance_int = int.from_bytes(s_xor_distance, byte_order="big")
+            if s_xor_distance_int == kademlia_state['siblings']['max']:
+                _kademlia_remove_node(node)
+                # Queue the node for re-addition. This will place it in the kbuckets
+                _kademlia_queue_add(node)
+                kademlia_state['siblings']['nodes'].append(new_node)
+                kademlia_state['siblings']['max'] = xor_distance
 
 
     nearest_bucket = _kademlia_nearest_bucket(node_id_bin)
-    # XXX TODO If the bucket is full:
-    #   Try to ping the least recently seen node. If it's alive, move it to most-recently seen and discard new entr
-    kademlia_state['k_buckets'][nearest_bucket].append((node_id, ip))
+    if len(kademlia_state['k_buckets'][nearest_bucket]) < KADEMLIA_K:
+        kademlia_state['k_buckets'][nearest_bucket].append((node_id, ip))
+    else:
+        # XXX TODO Try to ping the least recently seen node.
+        # If it's alive, move it to most-recently seen and discard new entr
+
+    # TODO add to trie if needed
+
+def _util_convert_bytestring_to_bits(bytes):
+    # this function shouldn't be needed in the rust version. we can just bit-twiddle in the trie
+    result = ""
+    for byte in bytes:
+        current_byte = ""
+        for n in range(8):
+            bit = (byte >> n) & 1
+            current_byte = "01"[bit] + current_byte
+        result += current_byte
+    return result
 
 def kademlia_find_node(request):
     """
@@ -469,101 +515,34 @@ def kademlia_find_node(request):
     If we have less than k nodes, we return all of them
     """
     req_node = request['node_id']
-    req_node_bin = base64.b64decode(req_node)
-    local_nodeid_bin = base64.b64decode(pub_to_nodeid(public_key))
-
-    # needed for old system: using k-bucket. use trie now. XXX delete the below line later
-    #xor_result = [a ^ b for a, b in zip(req_node_bin, local_nodeid_bin)]
-
-    # TODO: We can get the true list of closest nodes by looking through
-    # a trie of all the ids we care to save
-
-    # Trie traversal: iterate through prefix of req_node_bin. when we find a difference,
-    # we pick all of the nodes in the leaf at that point. If there are less than
-    # k, we backtrack and check if there are any leaves on the paths we skipped.
-    # We stop when we have k nodes or have reached the root of the tree.
-
-    # Example trie of known nodes. If we try to match something with a prefix of 0, we should return 011, then the ones from the other side.
-    # It would be nice if we could quickly get a list of nodes from the other side of the trie. we can get the list by
-    # iterating through the tree. This seems like it would be slow.
-    # I guess this is why Mainline uses the strategy of the tree with lists at the leaves (representing the kbuckets)
-    # In that system you can get to lists of nodes much more quickly.
-    #  (null)
-    # 0/        \1
-    #(011)   0/  \1
-    #     (100)  (110)
-
-    # It should be possible to keep the trie without sacrificing the k buckets. At each bit, there will be a list stored representing the
-    # kbucket.
-    # Basically, we'll have the kbucket lists or tags to manage our accounting and node update schedules
-    # And then we'll also have a list of n k-lists that represent the list of nodes for that bit prefix.
-    # So if our node id was 0111xxx, we'd have lists for 1xxxx, 00xxx, and 010xx, 0110x, then finally 0111x
-    # Basically, we choose the kbucket based on the first index of a different bit, just as before
-    # The different would be that the size of these buckets might not be limited to K, so we'll need
-    # a different structure for accounting. Hm.
-    # There might actually be a lot of nodes in these lists. I guess that's where the trie makes the most
-    # sense. Since a person might be a member of many libraries, a query for 1xxxx could have some nodes
-    # that are closer to the query than others, but in this system they won't be sorted in any way. With
-    # the trie, we can return a closer result.
-
-    # 16 (K) * 256 (N) * 6 (L) = 24,576
-    # A long live active node in 5 libraries might see around 25k nodes. I think
-    # This the idea of a trie with a list of its children at each intermediate
-    # node impossible. The size will explode.
-
-    # Oh oh, what if we keep a sorted list of the nodes. Easy to do numerically.
-    # Then we can use the trie to get an index into the list. Hell, the trie
-    # leaves could be a doubly linked list, which would make inserting and
-    # deleting a node easy!
-    # Then, assuming 8 bytes for a pointer, the size of the trie would be 24576 * log_2(24576) * 8 =
-    # 2.8675 million ~ 2.75 MiB
-    # 3 megabytes for the trie and then k+log(n) lookup time doesn't sound that bad...
-    # It's n*log(n) for the trie size
-
-    # I need to check if this is actually an improvement. Is it better to give
-    # ids of nodes in the left direction of the list? I've been assuming I'd
-    # only move right through the list once finding the closest match in the trie.
-    # But what if there's a jump moving from left to right? Should choosing the
-    # nearest nodes be based on keeping the numerical distance low? This can
-    # also be done in k time. We can keep track of the "left" and "right"
-    # distance and choose whatever direction has the lowest distance. This
-    # only requires two counters and two pointers.
-
-    # Alright, now I just need to make sure choosing "closer" values actually
-    # makes sense. I want to choose whatever keeps the overall query times low.
-    # Unfortunately this will probably require experimentation.
-    # (Note from later: Choosing the numerically closer path does not make
-    # sense unfortunately. There's a big note in Notes where I worked through
-    # a few examples. An intuitive way to think of the problem is that the
-    # transition from 0111 to 1000 has a tiny numerical distance but a huge XOR
-    # distance)
-
-    # Limiting queries to within a library will also require changes.
-    # I think each trie node would also need to keep separate pointers for the
-    # next nodes in that libraries particular list. Otherwise, we'd have to
-    # go through all the node in the list before deciding there are no more left.
-    # This would mean node storage is multiplied by L in the worst case.
-
-
-
-    # Old code: Looks through the kbuckets.
-    # results = []
-    # nearest_nodes = _kademlia_nearest_nodes(xor_result)
-    # for node in nearest_nodes:
-    #     results.append(node)
-    #     if len(results) >= KADEMLIA_K:
-    #         break
-    results = []
+    results = _kademlia_nearest_nodes(req_node_bits)
+    # TODO make response with signature
     return results
 
-def kademlia_ping():
-    # TODO XXX This will be too expensive to do full TLS connections for every connection
-    # Instead we should exchanged signed data over a UDP connection
-    # The S/Kademlia paper has an interesting distrinction of weak signatures
-    # That can be verifiably trasferred.
+def kademlia_find_value(request):
+    """
+    Returns the value if we have it, or return the k nearest nodes to the node.
+    """
+    req_id = request['node_id']
+    if req_id in kademlia_state['data_store']:
+        results = kademlia_state['data_store']['req_id']
+    else:
+        results = _kademlia_nearest_nodes(req_node_bits)
+    # TODO make response with signature
+    return results
+
+def kademlia_do_ping():
     connection = connections[node]
-    msg = kademlia_generate_msg(FIND_NODE, node_id)
+    msg = kademlia_generate_msg(PING, node_id)
+    # TODO: needs to generate signature
+    # TODO: wait for PONG response and confirm signature and address match of node
+        # TODO: Need to create closure or request record with timeout
     connection.send_request(msg)
+
+def kademlia_handle_ping(request):
+    # TODO: try add_node
+    # TODO send PONG response
+    pass
 
 def kademlia_send_find_node(node):
     # TODO This should use the UDP port instead for performance
@@ -571,7 +550,7 @@ def kademlia_send_find_node(node):
     msg = kademlia_generate_msg(FIND_NODE, node_id)
     connection.send_request(msg)
 
-def kademlia_continue_lookup(lookup_id, msg):
+def _kademlia_continue_lookup(lookup_id, msg):
     lookup_state = kademlia_lookups[lookup_id]
     # Continue lookup until the k nearest nodes have replied
     # TODO for S/Kademlia, I suppose we have to be smarter about disjoint paths?
@@ -592,17 +571,14 @@ def kademlia_do_lookup(node_id):
     # Need to consider disjoint paths specifically. This ensures that a single
     # adversarial node can't disrupt the system.
 
-    req_node_bin = base64.b64decode(node_id)
-    local_nodeid_bin = base64.b64decode(pub_to_nodeid(public_key))
-
-    xor_result = [a ^ b for a, b in zip(req_node_bin, local_nodeid_bin)]
+    # TODO, this function should be able to handle both FIND_NODE and FIND_VALUE
 
     lookup_id = random()
     kademlia_lookups[lookup_id] = new_lookup_state()
     callback = lambda msg: kademlia_continue_lookup(lookup_id, msg)
 
     nearest_nodes = []
-    for node in _kademlia_nearest_nodes(xor_result):
+    for node in _kademlia_nearest_nodes(node_id):
         nearest_nodes.append(node)
         if len(nearest_nodes) >= KADEMLIA_K:
             break
@@ -627,13 +603,37 @@ def kademlia_do_lookup(node_id):
 
         kademlia_send_find_node(node, callback)
 
-def kademlia_store():
+def kademlia_do_store():
+    # Look up nearest nodes to ID.
+    generate_store_request_and_sign
+    nearest_nodes = kademlia_do_lookup(key_id)
+    # Sends signed store request to each node
+    send_to_all(nearest_nodes, store_request)
+
+def kademlia_store(request):
     """
     Announcements will have to signed and timestamped. This way we can filter out
     outdated information in a reliable verifiable way, and ensure that announcements
     are always authenticated
     """
-    pass
+
+    if request['data']['timestamp'] < _24_hours_ago:
+        # Ignore stale STOREs
+        print("received stale STORE")
+        return
+
+    public_key = request['data']['pubkey']
+    if not verify_signature(request['data'], public_key):
+        print("received invalid STORE")
+        return
+
+    # TODO: enforce storage limits
+    # TODO: eliminate old values if needed
+    # TODO: STOREs should probably include a Proof-of-Work
+
+    key = request['data']['key']
+    value = (request_data['pubkey'], request['data']['ip'], request['data']['port'])
+    kademlia_state['data_store'][key].append(value)
 
 def initialize_dht(socket):
     # initialize global DHT

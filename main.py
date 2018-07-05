@@ -85,10 +85,19 @@ gevent.wait()  # wait forever
 
 # TODO Get peers / Initialize DHT
 # TODO Contact library leaders (if member of library)
+    # TODO Just need to see latest signed updates in the ledger. Can come from
+    # any library members.
+    # The blockchain is secured by consecutive hashses
+    # Internal library state is governed by a dictator
 
  #TODO LATER
 # TODO Update blockchain state
 
+
+# TODO in real implementation
+# discover public ip address by either querying external service
+#  or, check traceroute until encountering non-reserved IP address (WEAK BUT EFFECTIVE)
+# need to open port using upnp
 
 # *~*~* Check database state *~*~*
 
