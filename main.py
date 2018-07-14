@@ -77,9 +77,13 @@ for node in known_nodes:
         continue
     libbiblion.connect(original_directory + '/' + node[1])
 
-# TODO Start UDP listener for DHT messages
-gevent.spawn(libbiblion.listen_for_connections)
-gevent.spawn(libbiblion.start_json_rpc, node_number)
+port = 8000 + (node_number * 2)
+
+gevent.spawn(libbiblion.listen_for_connections, port)
+gevent.spawn(libbiblion.listen_for_datagrams, port)
+gevent.spawn(libbiblion.start_json_rpc, port+1)
+
+
 
 gevent.wait()  # wait forever
 
@@ -89,19 +93,35 @@ gevent.wait()  # wait forever
     # any library members.
     # The blockchain is secured by consecutive hashses
     # Internal library state is governed by a dictator
+    # Both can be represented as merkle objects in Biblion
+
+# This should be done concurrently with global DHT bootstrap
+for library in self.libraries:
+    # sync user db
+    library.sync_user_state()
+    # at this point (or at least within some condifence), we can enable the virtual dht for this library
+    # sync ledger
+    library.sync_transaction_state()
+    # sync metadata
+    # XXX must sync library config as well
+    for data_id in library.metadata:
+        library.sync_data_item(data_id)
 
  #TODO LATER
 # TODO Update blockchain state
+
+# TODO
+# Need to make kademlia implementation mostly safe from DDoS
 
 
 # TODO in real implementation
 # discover public ip address by either querying external service
 #  or, check traceroute until encountering non-reserved IP address (WEAK BUT EFFECTIVE)
-# need to open port using upnp
+# need to open port using upnp or NATPMP
+# alternatively, we can use UDP hole punching, then negotiate a TCP hole punch across a UDP channel
 
 # *~*~* Check database state *~*~*
-
-# TODO Load extant piece data
-# TODO Request data updates from library leaders
-
-# TODO Publish data possession to DHT peers
+for file in database:
+    # verify present
+    # queue announcement on dhts as needed
+    pass
