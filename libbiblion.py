@@ -4,6 +4,7 @@ import struct
 import socket
 import random
 import os
+import time
 
 from copy import copy
 
@@ -11,18 +12,21 @@ import http.server
 import socketserver
 
 import gevent
+from gevent.event import Event
 from flask import Flask
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 
 public_key = None
 private_key = None
 connections = {}
-active_requests = {}
+active_streams = {}
+_next_stream_id = 1
 
 KADEMLIA_K = 16  # k-bucket size
 KADEMLIA_D = KADEMLIA_K / 2  # number of disjoint paths. Similar to `alpha` in original kademlia paper
@@ -31,15 +35,23 @@ KADEMLIA_SIBLENGTH = KADEMLIA_K * 7  # number of entries in the sibling list
 kademlia_state = {'trie': {'children': {}, 'leaf': None, 'count': 0},
                   'active_nodes': {},  # map of active nodes for quick node lookup
                   'k_buckets': {},  # accounting structure for managing far away nodes
-                  'siblings': {'nodes': [], 'max': None},  # accounting for close nodes. We store 7k neighbors to ensure we know our neighborhood
+                  'siblings': {'nodes': [], 'max': 0},  # accounting for close nodes. We store 7k neighbors to ensure we know our neighborhood
                   'data_store': {}}  # values stored in our node. # XXX needs size constraint.
 for i in range(256): kademlia_state['k_buckets'][i] = []
 
 httpd_instance = None
+tcp_socket = None
+
+_global_port = None
 
 def listen_for_connections(port):
+    # lmao, this hack should absolutely not be here
+    global _global_port
+    _global_port = port
     # XXX Listening on ipv6 should help remove NAT troubles, but it probably isn't widely supported
+    global tcp_socket
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        tcp_socket = sock
         sock.bind(("127.0.0.1", port))
         sock.listen(50)
 
@@ -64,7 +76,9 @@ def listen_for_datagrams(port):
             # should probably set message state and include address or some shit
             # that way we can check "connection" info even on a connectionless basis
             (message, _, _, address) = sock.recvmsg(65536)
-            handle_message(message)
+            # TODO XXX need to generate conn context
+            # It can be a pseudo connection, but it needs to have the context of how to reply to the message
+            handle_message(conn, message)
 
 
 # Messages will be handled asynchronously. Each request has
@@ -75,70 +89,96 @@ def listen_for_messages(node_id):
     conn = connections[node_id]
     while conn['connected']:
         message = recv_message(conn['socket'])
-        handle_message(message)
+        message = sym_decrypt(message, conn['session_key'])
+        handle_message(conn, message)
         # TODO handle disconnect
 
-def handle_message(message):
-    # XXX XXX XXX
-    # XXX XXX XXX
-    # XXX XXX XXX
-    # XXX Need to complete all this junk
+def handle_message(conn, message):
+    # For now, each message will be a JSON object describing the packet
+    # Each packet should have a streamId that represents an RPC or data flow
 
-    if message['reqid']:
-        # TODO Listeners can have expiration time
-        reqid = message['reqid']
-        if reqid in active_requests:
-            # dispatch message
-            active_requests[reqid](message)
-            del active_requests[reqid]
+    global active_streams
 
+    # TODO Streams can have expiration time
+    message = json.loads(message)
+    inner_msg = message['data']
+    stream_id = message['streamId']
+    if stream_id in active_streams:
+        stream = active_streams[stream_id]
+        stream['data'].append(inner_msg)
+        stream['event'].set()
     else:
-        mt = message['type']
-        # over udp
-        if mt == 'ping':
-            pass
-        elif mt == 'kademlia_find_node':
-            kademlia_find_node(message, query="node")
-        elif mt == 'kademlia_find_value':
-            kademlia_find_node(message, query="value")
-        elif mt == 'kademlia_publish':
-            kademlia_store(message)
-        # over TCP
-        elif mt == 'shelf_publish_data':
-            pass
-        elif mt == 'lynx_request_join':
-            # TODO XXX this should be based on a higher level p2p messaging system
-            # maybe called something like "metalib"
-            pass
-        elif mt == 'lynx_accept_join':
-            # TODO XXX see above
-            pass
-        elif mt == 'lynx_submit_edit':
-            # TODO XXX see above
-            pass
-        elif mt == 'lynx_get_pieces':
-            # Request a range of pieces
-            # should implement dynamic choke algorithm
-            # check out libtorrent. they have a good one for seeding that prefers peers who just started or who are about to finish
-            #https://github.com/arvidn/libtorrent/blob/master/src/choker.cpp
-            lynx_get_pieces(request)
-        elif mt == 'lynx_peer_exchange':
-            # Return known peers that have the same content. Useful for swarm management
-            pass
-        elif mt == 'lynx_send_transaction':
-            #
-            pass
-        elif mt == 'biblion_sync_blockchain':
-            # Return what the most recent block number is
-            pass
-        elif mt == 'biblion_query_price':
-            # should specify what we have in a request.
-            # response should in include what they have and if they accept our proposal.
-            pass
-        elif mt == 'biblion_announce_block':
-            pass
-        elif mt == 'biblion_send_transaction':
-            pass
+        active_streams[stream_id] = {'data': [inner_msg],
+                                     'event': Event(),
+                                     'open': True,
+                                     'conn': conn,
+                                     'header': build_stream_header_from_message(message)}
+        gevent.spawn(handle_new_request, active_streams[stream_id])
+
+    if 'closeStream' in message:
+        active_streams[stream_id]['open'] = False
+        del active_streams[stream_id]
+
+def handle_new_request(stream):
+    """
+    Temporary generic request handler for biblion.
+    Protocol 1 (Though protocol number isn't even used yet, as of this comment).
+    Each message has a type and a payload.
+    The type should eventually be mostly elevated to the streaming layer, with
+    message signaling handled per application.
+    """
+
+    message = stream['data'].pop()
+    mt = message['type']
+
+    # over udp
+    if mt == 'ping':
+        pass
+    elif mt == 'hello':
+        handle_hello(stream, message['payload'])
+    elif mt == 'kademlia_find_node':
+        kademlia_find_node(stream, message['payload'], query="node")
+    elif mt == 'kademlia_find_value':
+        kademlia_find_node(stream, message['payload'], query="value")
+    elif mt == 'kademlia_publish':
+        kademlia_store(stream, message['payload'])
+    # over TCP
+    elif mt == 'shelf_publish_data':
+        pass
+    elif mt == 'lynx_request_join':
+        # TODO XXX this should be based on a higher level p2p messaging system
+        # maybe called something like "metalib"
+        pass
+    elif mt == 'lynx_accept_join':
+        # TODO XXX see above
+        pass
+    elif mt == 'lynx_submit_edit':
+        # TODO XXX see above
+        pass
+    elif mt == 'lynx_get_pieces':
+        # Request a range of pieces
+        # should implement dynamic choke algorithm
+        # check out libtorrent. they have a good one for seeding that prefers peers who just started or who are about to finish
+        #https://github.com/arvidn/libtorrent/blob/master/src/choker.cpp
+        lynx_get_pieces(request)
+    elif mt == 'lynx_peer_exchange':
+        # Return known peers that have the same content. Useful for swarm management
+        pass
+    elif mt == 'lynx_send_transaction':
+        #
+        pass
+    elif mt == 'biblion_sync_blockchain':
+        # Return what the most recent block number is
+        pass
+    elif mt == 'biblion_query_price':
+        # should specify what we have in a request.
+        # response should in include what they have and if they accept our proposal.
+        pass
+    elif mt == 'biblion_announce_block':
+        pass
+    elif mt == 'biblion_send_transaction':
+        pass
+
 
 def pub_to_nodeid(pubkey):
     digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
@@ -161,7 +201,8 @@ def libbiblion_init(pubkey, privkey):
     private_key = privkey
 
 def encode_message(data):
-    data = data.encode('utf-8')
+    if type(data) == str:
+        data = data.encode('utf-8')
     length = len(data)
     encoded_length = struct.pack('I', length)
     return encoded_length + data
@@ -176,7 +217,7 @@ def handle_connection(client_socket):
     Server-side of persistent connection handshake
     """
 
-    global connections
+    global connections, _next_stream_id
 
     # Request 1: local public key, challenge
     req = recv_message(client_socket)
@@ -204,16 +245,22 @@ def handle_connection(client_socket):
     except:
         print("Signature of other node could not be verified")
 
-    # End: ECDH[E]
+    # End: ECDH
     shared_key = private_key.exchange(ec.ECDH(), node_pubkey)
 
     node_id = pub_to_nodeid(node_pubkey)
+    ip, port = client_socket.getpeername()
     print("Successfully connected to", node_id)
     connections[node_id] = {'pubkey': node_pubkey,
+                            'node_id': node_id,
                             'session_key': shared_key,
+                            'ip': ip,
+                            'port': port,
+                            'type': 'listener',
                             'socket': client_socket,
                             'connected': True}
 
+    _next_stream_id += 1  # listener uses even stream IDs
     listen_for_messages(node_id)
 
 
@@ -228,8 +275,8 @@ def connect(node):
     # connecting. This can be derived from the DHT list (or hardcoded for the bootstrap node(s))
 
     # Connect
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sock.connect(node)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.connect((node['address'], node['port']))
 
     # Request 1: local public key, challenge
     nonce = random.randint(0, (2**32)-1)
@@ -263,29 +310,143 @@ def connect(node):
 
     node_id = pub_to_nodeid(node_pubkey)
     print("Successfully connected to", node_id)
-    connections[node_id] = {'pubkey': node_pubkey,
+    connections[node_id] = {'node_id': node_id,
+                            'pubkey': node_pubkey,
                             'session_key': shared_key,
+                            'ip': node['address'],
+                            'port': node['port'],
                             'socket': sock,
+                            'type': 'dialer',
                             'connected': True}
 
-def send_datagram(address, message, is_request=False):
-    # tag the message with our ip and Signature
-    # if request, generate request id and save reference to it
-    # send datagram
+    gevent.spawn(listen_for_messages, node_id)
+    send_hello(connections[node_id])
 
+def collect_addresses(node_id):
+    """
+    Returns the internet addresses for the given peer id. This returns addresses
+    for the currently running node.
+    """
+    return {'ipv4': [('127.0.0.1', _global_port)]}
 
-def send_message(conn, msg):
-    # TODO XXX for now, we handle all messaging synchronously. We should add
-    # multiplexing SOON
+def collect_protocols(node_id):
+    """
+    Returns the library:protocol pairs for the given node id. This represents
+    nodes running on our current instance
+    """
+    # XXX TODO actually check what libraries we are a member of.
+    return {'_global': ['dht']}
 
-    conn.sendall(msg)
+def send_hello(conn):
+    # message should include our public addresses, our public library memberships, and our services for each library
 
-def send_request(conn, cb):
-    active_requests[msg_id] = cb
-    conn.send_message(msg)
+    message = {'type': 'hello',
+               'payload': {
+                    # TODO XXX need to get our current peer id for the current connection
+                   'addrs': collect_addresses(None),
+                   'libraries': collect_protocols(None)
+               }}
 
-def generate_request(command, data):
-    pass
+    response = send_request_sync(conn, message)
+    response = response[0]['payload']
+    print("got HELLO response")
+
+    # TODO process library memberships in response or something
+    conn['addrs'] = response['addrs']
+    _kademlia_add_node(conn)
+
+def handle_hello(stream, request):
+    # record libraries and services provided by node
+
+    print("Handling HELLO")
+
+    stream['conn']['addrs'] = request['addrs']
+    response = {'type': 'hello',
+                'payload': {'addrs': collect_addresses(None),
+                            'libraries': collect_protocols(None)}}
+    response_obj = copy(stream['header'])
+    response_obj['data'] = response
+    response_obj['closeStream'] = True
+    send_message(stream['conn'], response_obj)
+    _kademlia_add_node(stream['conn'])
+
+_signed_id = None
+def _get_signed_id():
+    global _signed_id
+    if not _signed_id or _signed_id['timestamp'] > _1_hour_ago:
+        id = {'node_id': own_id,
+              'address': {'family': 'ipv4', 'nat': 'open', 'address': get_address(), 'port': get_port()},
+              'timestamp': timestamp_now()}
+        json_id = json.dumps(id, sort_keys=True)
+        signature = sign(json_id)
+        _signed_id = {'id' : id, 'sig': signature}
+    # otherwise, generate an object with our address (family, nat, address, port), a timestamp, and a signature
+    return _signed_id
+
+_next_req_id = 1
+def send_datagram(address, port, message, is_request=False):
+    message['from'] = _get_signed_id()
+    if is_request:
+        message['req_id'] = _req_id
+        _next_req_id += 1
+    encoded_message = json.dumps(message, sort_keys=True)
+    dsock.sendto(message, (address, port))
+
+def sym_decrypt(message, key):
+    aesgcm = AESGCM(key)
+    return aesgcm.decrypt(b'\x01', message, None)
+
+def sym_encrypt(message, key):
+    aesgcm = AESGCM(key)
+    return aesgcm.encrypt(b'\x01', message, None)
+
+def send_message(conn, message):
+    message = json.dumps(message).encode('utf-8')
+    enc_msg = encode_message(sym_encrypt(message, conn['session_key']))
+    conn['socket'].sendall(enc_msg)
+
+def build_stream_header_from_message(message):
+    return build_stream_header(message['protocolId'],
+                               message['streamId'],
+                               message.get('libraryId'))
+
+def build_stream_header(protocol_id, stream_id, library_id):
+    header = {'protocolId': protocol_id, 'streamId': stream_id}
+    if library_id:
+        header['libraryId'] = library_id
+    return header
+
+def create_stream(conn, protocol_id, library_id=None):
+    global _next_stream_id
+    active_streams[_next_stream_id] = {'data': [],
+                                       'event': Event(),
+                                       'open': True,
+                                       'conn': conn}
+    header = build_stream_header(protocol_id, _next_stream_id, library_id)
+    active_streams[_next_stream_id]['header'] = header
+    msg_id = _next_stream_id
+    _next_stream_id += 2
+    return msg_id
+
+def send_request_sync(conn, request):
+    # Sends a request and waits for a response from the remote peer.
+    # Create a stream context with a protocol and library information
+    # These will be used to initialize the stream
+    # Send the request in the first packets.
+    # Await the response from the other side.
+
+    stream_id = create_stream(conn, 1)  # TODO XXX protocol 1 is generic Biblion protocol
+    message = copy(active_streams[stream_id]['header'])
+    message['openStream'] = True
+    message['data'] = request
+    send_message(conn, message)
+
+    stream = active_streams[stream_id]
+    while stream['open']:
+        stream['event'].wait()
+        stream['event'].clear()
+
+    return stream['data']
 
 def start_bank(library):
     # this function probably isn't needed but i wanted to write some notes
@@ -336,6 +497,7 @@ def do_fetch(fetch_data):
                     p.request_piece(piece, payment_channel)
         else:
             # mark the node as unneeded. it can be pruned or kept active for gossip, etc
+            # should send goaway if truly unneeded
             p.mark_as_unneeded()
 
 
@@ -357,6 +519,7 @@ def _kademlia_nearest_bucket(n):
     # Returns None if the bytestring doesn't belong in a bucket (it's the same as our nodeid)
     # XXX We should be able to find the nearest bucket faster using deBrujin sequences
     # http://supertech.csail.mit.edu/papers/debruijn.pdf
+    n = n.to_bytes(32, byteorder="big")
     for i, b in enumerate(n):
         e = 7
         while e > 0:
@@ -366,21 +529,20 @@ def _kademlia_nearest_bucket(n):
 
 def _kademlia_nearest_nodes(node_id):
     # keep returning neighbors near n until there are none left
-    node_id_bytes = base64.b64decode(node_id)
-    node_id_bin = _util_convert_bytestring_to_bits(node_id)
+    node_id_bin = _util_nodeid_to_bits(node_id)
     # optimization: just return all nodes if less than k. TODO only enable after testing the normal way.
     # if len(kademlia_state['active_nodes']) <= KADEMLIA_K:
     #     return list(kademlia_state['active_nodes'].values())
     return _k_trie_get_closest(node_id_bin)
 
-def _k_trie_remove_node(node_id):
+def _k_trie_remove_node(node_id_bin):
     # Remove a node from the trie
 
     # TODO XXX None of this code is thread safe lol
 
     trie_root = kademlia_state['trie']
 
-    if trie_root['leaf'] and trie_root['leaf']['node_id'] != node_id:
+    if trie_root['leaf'] and trie_root['leaf']['node_id'] != node_id_bin:
         print("Trie does not have requested node")
         return
     elif not trie_root['leaf'] and not trie_root['children']:
@@ -392,16 +554,16 @@ def _k_trie_remove_node(node_id):
     last_parent = None
     while current_node['leaf'] is None:
         while node_id_index < len(current_node['prefix']):
-            if current_node['prefix'][node_id_index] != node_id[node_id_index]:
+            if current_node['prefix'][node_id_index] != node_id_bin[node_id_index]:
                 print("Node could not be found")
                 return
             node_id_index += 1
         last_parent = current_node
         current_node['count'] -= 1
-        current_node = current_node['children'][node_id[node_id_index]]
+        current_node = current_node['children'][node_id_bin[node_id_index]]
 
     if last_parent:
-        other_branch = '0' if node_id[node_id_index] == '1' else '1'
+        other_branch = '0' if node_id_bin[node_id_index] == '1' else '1'
         old_branch = last_parent['children'][other_branch]
         if old_branch['children']:
             last_parent['children'] = old_branch['children']
@@ -418,7 +580,7 @@ def _k_trie_remove_node(node_id):
 
 def _k_trie_add_node(node_object):
     trie_root = kademlia_state['trie']
-    node_id = node_object['node_id']
+    node_id = node_object['node_id_bin']
 
     node_id_index = 0
     current_node = trie_root
@@ -543,6 +705,15 @@ def _k_trie_get_closest(node_id):
 
     return results
 
+def _node_xor_distance(node1, node2):
+    # expects base64 node ids
+    # returns an integer representing the XOR distance
+    n1b = base64.b64decode(node1)
+    n2b = base64.b64decode(node2)
+    xor = [a^b for a, b in zip(n1b, n2b)]
+    return int.from_bytes(xor, byteorder="big")
+
+
 def _kademlia_remove_node(node):
     # removes the node from its kbucket and from the trie
     if node['is_sibling']:
@@ -559,6 +730,7 @@ def _kademlia_remove_node(node):
 def _kademlia_queue_add(node):
     # TODO check where this is called and make sure signature is checked where needed
     # TODO Queues a node for addition to our Kademlia state
+    # This is needed to ensure we limit lock contention on the trie, etc
     pass
 
 
@@ -573,52 +745,42 @@ def _kademlia_add_node(request):
     own_id = pub_to_nodeid(public_key)
 
     if node_id == own_id:
+        # We don't add ourselves to the DHT. It's unnecessary
         return
 
-    node_id_bin = base64.b64decode(node_id)
-    node_id_bits = _util_convert_bytestring_to_bits(node_id_bin)
-    ip = request['ip']
-    port = request['port']
-    signature = request['signature']
+    addresses = request['addrs']
 
     if node_id in kademlia_state['active_nodes']:
         # TODO should be moved to end of list?
         kademlia_state['active_nodes'][node_id]['last_seen_timestamp'] = time.time()
         return
-
-
-    own_id_bin = base64.b64decode(own_id)
-    xor_distance = [a^b for a, b in zip(own_id_bin, node_id_bin)]
-    xor_distance_int = int.from_bytes(xor_distance, byte_order="big")
+    xor_distance_int = _node_xor_distance(own_id, node_id)
 
     new_node = {
         'node_id': node_id,
-        'ip': ip,
-        'port': port,
+        'node_id_bin': _util_nodeid_to_bits(node_id),
+        'addrs': addresses,
         'last_seen_timestamp': time.time()
     }
 
-    nearest_bucket_id = _kademlia_nearest_bucket(node_id_bin)
+    nearest_bucket_id = _kademlia_nearest_bucket(xor_distance_int)
     nearest_bucket = kademlia_state['k_buckets'][nearest_bucket_id]
 
     if len(kademlia_state['siblings']['nodes']) < KADEMLIA_SIBLENGTH:
         kademlia_state['siblings']['nodes'].append(new_node)
         if xor_distance_int > kademlia_state['siblings']['max']:
-            kademlia_state['siblings']['max'] = xor_distance
+            kademlia_state['siblings']['max'] = xor_distance_int
     elif xor_distance_int < kademlia_state['siblings']['max']:
         # XXX O(n) performance sink :(
         # find the max and kick it out into the k buckets
         for node in kademlia_state['siblings']:
-            s_node_id = node['node_id']
-            s_node_id_bin = base64.b64decode(s_node_id)
-            s_xor_distance = [a^b for a, b in zip(own_id_bin, s_node_id_bin)]
-            s_xor_distance_int = int.from_bytes(s_xor_distance, byte_order="big")
+            sibling_distance = _node_xor_distance(own_id, node['node_id'])
             if s_xor_distance_int == kademlia_state['siblings']['max']:
                 _kademlia_remove_node(node)
                 # Queue the node for re-addition. This will place it in the kbuckets
                 _kademlia_queue_add(node)
                 kademlia_state['siblings']['nodes'].append(new_node)
-                kademlia_state['siblings']['max'] = xor_distance
+                kademlia_state['siblings']['max'] = xor_distance_int
     elif len(nearest_bucket) < KADEMLIA_K:
         nearest_bucket.append(new_node)
     else:
@@ -635,6 +797,10 @@ def _kademlia_add_node(request):
     # Add the node to the trie
     _k_trie_add_node(new_node)
 
+def _util_nodeid_to_bits(node_id):
+    node_id_bytes = base64.b64decode(node_id)
+    return _util_convert_bytestring_to_bits(node_id_bytes)
+
 def _util_convert_bytestring_to_bits(bytes):
     # this function shouldn't be needed in the rust version. we can just bit-twiddle in the trie
     result = ""
@@ -646,16 +812,24 @@ def _util_convert_bytestring_to_bits(bytes):
         result += current_byte
     return result
 
-def kademlia_find_node(request):
+def kademlia_find_node(request, query=None):
     """
     Finds the k nearest nodes in our kademlia database
     If we have less than k nodes, we return all of them
     """
-    r
-    if request.signature.address == message.address:
-        _kademlia_queue_add(request)
+
+    if not query:
+        print("FIND query should specify NODE or VALUE")
+        return
+
+    # TODO XXX enable when using UDP DHT
+    # if request.signature.address == message.address:
+    #     _kademlia_queue_add(request)
     req_node = request['node_id']
-    results = _kademlia_nearest_nodes(req_node_bits)
+    if query == 'value' and req_node in data_store:
+        result = data_store.get(req_node)
+        return result
+    results = _kademlia_nearest_nodes(req_node)
     # TODO make response with signature
     return results
 
@@ -667,7 +841,7 @@ def kademlia_find_value(request):
     if req_id in kademlia_state['data_store']:
         results = kademlia_state['data_store']['req_id']
     else:
-        results = _kademlia_nearest_nodes(req_node_bits)
+        results = _kademlia_nearest_nodes(req_node)
     # TODO make response with signature
     return results
 
@@ -686,11 +860,15 @@ def kademlia_ping(request):
         _kademlia_queue_add(request)
     send_message(generate_kademlia_pong(request))
 
-def kademlia_send_find_node(node):
-    # TODO This should use the UDP port instead for performance
-    connection = connections[node]
+def kademlia_send_find_node(node_info):
     msg = kademlia_generate_msg(FIND_NODE, node_id)
-    connection.send_request(msg)
+    if node.is_connected:
+        node.send_request(msg)
+    else:
+        # TODO use UDP. This should be abstracted away as far as possible
+        address, port = get_ipv4_address(node)
+        send_datagram(msg, address)
+        connection.send_request(msg)
 
 def _kademlia_continue_lookup(lookup_id, msg):
     lookup_state = kademlia_lookups[lookup_id]
@@ -700,9 +878,9 @@ def _kademlia_continue_lookup(lookup_id, msg):
 def kademlia_do_lookup(node_id):
     # TODO, this function should be able to handle both FIND_NODE and FIND_VALUE
 
-    lookup_id = random()
-    kademlia_lookups[lookup_id] = new_lookup_state()
-    callback = lambda msg: kademlia_continue_lookup(lookup_id, msg)
+    # lookup_id = random()
+    # kademlia_lookups[lookup_id] = new_lookup_state()
+    # callback = lambda msg: kademlia_continue_lookup(lookup_id, msg)
 
     nearest_nodes = []
     for node in _kademlia_nearest_nodes(node_id):
@@ -722,8 +900,12 @@ def kademlia_do_lookup(node_id):
     # TODO: we should probably have a limiter for IP address to prevent sybil. though a few on same ip is fine
     accessed_nodes = []
 
+    def _xor_with(node_id):
+        return lambda n: _node_xor_distance(node_id, n)
+
     for path in dpaths:  # greenlet for each
-        for n in path.sorted:
+        sorted_path = sorted(path, key=_xor_with(own_id))
+        for node in sorted_path:
             if not node.accessed:
                 node = n
                 break
@@ -735,16 +917,37 @@ def kademlia_do_lookup(node_id):
         node = path.sorted.pop(0)  # sorted by XOR distance from target
         accessed_nodes.append(node)  # synchronized
         new_nodes = kademlia_send_find_node(node, callback)
-        if confirm_sig(node):
-            _kademlia_queue_add(node)
-        if node_id in new_nodes:
-            return
+        # TODO XXX need to enable this for UDP kademlia
+        #if confirm_sig(node):
+        #   _kademlia_queue_add(node)
+
+        # TODO XXX I think this is for when this code should support FIND_VALUE
+        #if node_id in new_nodes:
+        #    return
         path.sorted.add(new_nodes)
+
+def kademlia_do_random_walk():
+    # For each bucket farther away than the closest populated one, choose a random
+    # id in that range and do a lookup on it
+
+    # TODO XXX
+    return
+
+    for bucket in sorted(kademlia_state['k_buckets'])[::-1]:
+        if kademlia_state['k_buckets'][bucket]:
+            closest_bucket = bucket
+            break
+    else:
+        print("No K-buckets populated? Oh no...")
+        return
+
+    for i in range(closest_bucket):
+        rand_id = generate_random_value_for_bucket(i)
+        kademlia_do_lookup(rand_id)
 
 
 def kademlia_do_store():
     # Look up nearest nodes to ID.
-    generate_store_request_and_sign
     nearest_nodes = kademlia_do_lookup(key_id)
     # Sends signed store request to each node
     send_to_all(nearest_nodes, store_request)
@@ -793,7 +996,7 @@ def initialize_dht():
 
     # TODO Random walk on each k bucket further than closest neighbor
     # this should be done asynchronously
-    kademlia_random_walk(closest_k_bucket)
+    kademlia_do_random_walk(closest_k_bucket)
 
 class BiblionRPCRequestHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
@@ -819,7 +1022,7 @@ class BiblionRPCRequestHandler(http.server.BaseHTTPRequestHandler):
                 elif parsed_data['command'] == 'dht_store':
                     pass
                 elif parsed_data['command'] == 'dht_find_node':
-                    response_data += json.dumps(kademlia_find_node(parsed_data))
+                    response_data += json.dumps(kademlia_find_node(parsed_data, query="node"))
                 elif parsed_data['command'] == 'dht_find_value':
                     pass
                 elif parsed_data['command'] == 'fetch_file':
@@ -855,6 +1058,13 @@ class BiblionRPCRequestHandler(http.server.BaseHTTPRequestHandler):
 
         if response_data:
             self.wfile.write(response_data.encode('utf-8'))
+
+def shutdown_sockets():
+    if tcp_socket:
+        # TODO XXX each connection should get a chance to GOAWAY and clean up
+        # also need to kill any active UDP activity
+        print("Shutting down TCP socket")
+        tcp_socket.close()
 
 def shutdown_json_rpc():
     if httpd_instance:

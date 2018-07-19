@@ -10,7 +10,10 @@ request it. In Biblion, everyone is a server! Everyone hosts parts of other's da
 You may have heard of system's like this before. IPFS, Dat project, Zeronet,
 Solid, and more! In [year], Tim Berners-Lee, creator of the original World Wide
 Web, stated that it's time to re-decentralize the web. Biblion is similar to
-these projects, but aims to construct something new: community. 
+these projects, but aims to construct something new: community.
+
+What is a data community? A data community is a set of people organizing
+information according to special rules as to who gets to
 
 Biblion is a server, and a standard for accessing and organizing data. All
 nodes participate in two global activities: a giant Distributed Hash Table (DHT),

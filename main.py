@@ -23,6 +23,7 @@ def async_suicide():
 def signal_handler(signal, frame):
         print('Shutting down...')
         gevent.spawn(libbiblion.shutdown_json_rpc)
+        gevent.spawn(libbiblion.shutdown_sockets)
         gevent.spawn(async_suicide)
 signal.signal(signal.SIGINT, signal_handler)
 
@@ -75,15 +76,15 @@ for node in known_nodes:
         # XXX need a stronger check
         # don't add self on DHT
         continue
-    libbiblion.connect(original_directory + '/' + node[1])
+    gevent.spawn(libbiblion.connect, node[1])
 
 port = 8000 + (node_number * 2)
+
+# TODO: Support multiple peer identities
 
 gevent.spawn(libbiblion.listen_for_connections, port)
 gevent.spawn(libbiblion.listen_for_datagrams, port)
 gevent.spawn(libbiblion.start_json_rpc, port+1)
-
-
 
 gevent.wait()  # wait forever
 
