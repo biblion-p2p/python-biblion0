@@ -3,9 +3,9 @@ from gevent.monkey import patch_all; patch_all();
 import argparse
 import json
 import os
-import sys
-import socket
 import signal
+import socket
+import sys
 import time
 
 import gevent

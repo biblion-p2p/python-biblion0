@@ -1,9 +1,10 @@
 import base64
 import json
-import struct
-import socket
-import random
 import os
+import random
+import shutil
+import socket
+import struct
 import time
 
 from copy import copy
@@ -130,6 +131,8 @@ def handle_new_request(stream):
 
     message = stream['data'].pop()
     mt = message['type']
+
+    print("Received message %s\n" % stream)
 
     # over udp
     if mt == 'ping':
@@ -372,6 +375,7 @@ def handle_hello(stream, request):
 
 _signed_id = None
 def _get_signed_id():
+    # TODO XXX this isn't used yet. We trade peer information in the HELLO message
     global _signed_id
     if not _signed_id or _signed_id['timestamp'] > _1_hour_ago:
         id = {'node_id': own_id,
@@ -460,19 +464,20 @@ def start_bank(library):
     pass
 
 def do_fetch(fetch_data):
-    if fetch_data.is_library and library.has_custom_routing:
+    if fetch_data.get('is_library') and library['has_custom_routing']:
         peers = library.router.get_peers
         if peers.failed:
             global_dht.get_peers
     else:
-        peers = global_dht.get_peers
+        peers = kademlia_do_lookup(fetch_data['id'], type="value")
 
-    connected_peers = peers.choose_random(10) # we connect to many peers to query their ownership, but will only download from 5
+    connected_peers = random.sample(peers, min(10, len(peers))) # we connect to many peers to query their ownership, but will only download from a few
+
     # TODO: At this point we should announce ourselves to the DHT. Hm, maybe this can be piggybacked on the FINDVALUE?
 
-    for p in connected_peeers:
+    for peer in connected_peers:
         # TODO XXX, we should wait for at least 5 peers to respond and choose the ones with the lowest ping. warning: those chosen nodes may have bad pricing!
-        p = p.connect
+        if peer
         res = p.query_data(fetch_data.id)
         if res.has_data:
             price = res.price
@@ -812,7 +817,7 @@ def _util_convert_bytestring_to_bits(bytes):
         result += current_byte
     return result
 
-def kademlia_find_node(request, query=None):
+def kademlia_find_node(stream, request, query=None):
     """
     Finds the k nearest nodes in our kademlia database
     If we have less than k nodes, we return all of them
@@ -825,12 +830,18 @@ def kademlia_find_node(request, query=None):
     # TODO XXX enable when using UDP DHT
     # if request.signature.address == message.address:
     #     _kademlia_queue_add(request)
-    req_node = request['node_id']
+    req_node = request['nodeId']
     if query == 'value' and req_node in data_store:
         result = data_store.get(req_node)
         return result
     results = _kademlia_nearest_nodes(req_node)
-    # TODO make response with signature
+    # TODO add signature for UDP response
+
+    # TODO clean this up and make it way fducking easier later
+    response_obj = copy(stream['header'])
+    response_obj['data'] = {'payload': results}
+    response_obj['closeStream'] = True
+    send_message(stream['conn'], response_obj)
     return results
 
 def kademlia_find_value(request):
@@ -860,27 +871,36 @@ def kademlia_ping(request):
         _kademlia_queue_add(request)
     send_message(generate_kademlia_pong(request))
 
-def kademlia_send_find_node(node_info):
-    msg = kademlia_generate_msg(FIND_NODE, node_id)
-    if node.is_connected:
-        node.send_request(msg)
+def kademlia_send_find_node(node_id):
+    msg = {'type': 'kademlia_find_node',
+           'payload': {'nodeId': node_id}}
+    print("Sending FIND_NODE to ", node_id)
+    if node_id in connections:
+        return send_request_sync(connections[node_id], msg)[0]['payload']
     else:
         # TODO use UDP. This should be abstracted away as far as possible
         address, port = get_ipv4_address(node)
         send_datagram(msg, address)
         connection.send_request(msg)
+        # todo get response or timeout and return
+        return []
 
 def _kademlia_continue_lookup(lookup_id, msg):
     lookup_state = kademlia_lookups[lookup_id]
     # Continue lookup until the k nearest nodes have replied
     # TODO for S/Kademlia, I suppose we have to be smarter about disjoint paths?
 
-def kademlia_do_lookup(node_id):
+def kademlia_do_lookup(node_id, type="node"):
     # TODO, this function should be able to handle both FIND_NODE and FIND_VALUE
 
     # lookup_id = random()
     # kademlia_lookups[lookup_id] = new_lookup_state()
     # callback = lambda msg: kademlia_continue_lookup(lookup_id, msg)
+
+    if type == 'value':
+        # TODO XXX when this inevitably fails, we should send_find_value below
+        if node_id in kademlia_state['data_store']:
+            return kademlia_state['data_store'][node_id]
 
     nearest_nodes = []
     for node in _kademlia_nearest_nodes(node_id):
@@ -891,7 +911,7 @@ def kademlia_do_lookup(node_id):
     # generate address lists for disjoint searches
     dpaths = {}
     for index, node in enumerate(nearest_nodes):
-        current_d = n % index
+        current_d = index % KADEMLIA_D
         if current_d not in dpaths:
             dpaths[current_d] = []
         dpaths[current_d].append(node)
@@ -900,23 +920,28 @@ def kademlia_do_lookup(node_id):
     # TODO: we should probably have a limiter for IP address to prevent sybil. though a few on same ip is fine
     accessed_nodes = []
 
-    def _xor_with(node_id):
-        return lambda n: _node_xor_distance(node_id, n)
+    # TODO this assumes the global connection
+    own_id = pub_to_nodeid(public_key)
 
-    for path in dpaths:  # greenlet for each
+    def _xor_with(nid):
+        return lambda n: _node_xor_distance(nid, n['node_id'])
+
+    for path in dpaths.values():  # greenlet for each
         sorted_path = sorted(path, key=_xor_with(own_id))
+        current_node = None
         for node in sorted_path:
-            if not node.accessed:
-                node = n
+            if not node in accessed_nodes:
+                current_node = node
                 break
             if index == KADEMLIA_K:
-                return path.sorted[:KADEMLIA_K]
-        else:
-            # found less than k
-            return path.sorted
-        node = path.sorted.pop(0)  # sorted by XOR distance from target
-        accessed_nodes.append(node)  # synchronized
-        new_nodes = kademlia_send_find_node(node, callback)
+                # This dpath is finished
+                break
+        if not current_node:
+            # done with this dpath.
+            break
+        accessed_nodes.append(current_node)  # synchronized
+        # XXX ah, we need to mark if the node actually responded. Not just if it was queried. That makes things more ugly. sigh...
+        new_nodes = kademlia_send_find_node(current_node['node_id'])
         # TODO XXX need to enable this for UDP kademlia
         #if confirm_sig(node):
         #   _kademlia_queue_add(node)
@@ -924,7 +949,21 @@ def kademlia_do_lookup(node_id):
         # TODO XXX I think this is for when this code should support FIND_VALUE
         #if node_id in new_nodes:
         #    return
-        path.sorted.add(new_nodes)
+
+
+        # Don't bother including our own id in the results, in case it's present. This simplifies the queries.
+        # We should be STOREing our own announcements anyway, though I guess maybe it doesn't make a difference.
+        # Hm, we should definitely be STORE the value if we're among the siblings for the key.
+        to_remove = []
+        for node in new_nodes:
+            if node['node_id'] == own_id:
+                to_remove.append(node)
+        for node in to_remove:
+            new_nodes.remove(node)
+        path.extend(new_nodes)
+        # XXX This needs to loop until the path is exhausted. Doesn't matter for now but will break things XXX
+
+    return sorted(accessed_nodes, key=_xor_with(own_id))[:KADEMLIA_K]
 
 def kademlia_do_random_walk():
     # For each bucket farther away than the closest populated one, choose a random
@@ -946,36 +985,87 @@ def kademlia_do_random_walk():
         kademlia_do_lookup(rand_id)
 
 
-def kademlia_do_store():
+def kademlia_do_store(key_id, value):
+    """
+    key_id: Base64 256 bit encoded key of the node or value to be stored
+    value: Value to store. Should be a timestamped and signed message
+    """
     # Look up nearest nodes to ID.
     nearest_nodes = kademlia_do_lookup(key_id)
     # Sends signed store request to each node
-    send_to_all(nearest_nodes, store_request)
+    store_request = {'type': 'kademlia_publish',
+                     'payload': {'key': key_id, 'value': value}}
+    for node in nearest_nodes:
+        if node['node_id'] in connections:
+            conn = connections[node['node_id']]
+            send_request_sync(conn, store_request)
+            # TODO check result
+        else:
+            # TODO need to send udp message and wait for response, getting handshake cookie if necessary
+            # Alternatively, connect to node with TCP and send them the STORE as normal
+            print("Tried to send STORE to unconnected node")
+            pass
 
-def kademlia_store(request):
+def kademlia_store(stream, request):
     """
     Announcements will have to signed and timestamped. This way we can filter out
     outdated information in a reliable verifiable way, and ensure that announcements
     are always authenticated
     """
 
-    if request['data']['timestamp'] < _24_hours_ago:
+    # XXX lol update this
+    _24_hours_ago = 0
+
+    store_request = request['value']['message']
+    if store_request['time'] < _24_hours_ago:
         # Ignore stale STOREs
         print("received stale STORE")
         return
 
-    public_key = request['data']['pubkey']
-    if not verify_signature(request['data'], public_key):
+    peer_pubbits = store_request['pubbits'].encode('utf-8')
+    peer_pubkey = serialization.load_pem_public_key(peer_pubbits,
+                                                    default_backend())
+    try:
+        peer_pubkey.verify(base64.b64decode(request['value']['sig'].encode('utf-8')),
+                           json.dumps(store_request, sort_keys=True).encode('utf-8'),
+                           ec.ECDSA(hashes.SHA256()))
+    except:
         print("received invalid STORE")
+        print(store_request)
+        print(peer_pubbits)
         return
 
     # TODO: enforce storage limits
     # TODO: eliminate old values if needed
     # TODO: STOREs should probably include a small Proof-of-Work
 
-    key = request['data']['key']
-    value = (request_data['pubkey'], request['data']['ip'], request['data']['port'])
-    kademlia_state['data_store'][key].append(value)
+    key = store_request['hash']
+    value = store_request
+    if key not in kademlia_state['data_store']:
+        kademlia_state['data_store'][key] = []
+    kademlia_state['data_store'][key].append(store_request)
+
+    # TODO clean this up and make it way fducking easier later
+    response_obj = copy(stream['header'])
+    response_obj['data'] = {'payload': True}
+    response_obj['closeStream'] = True
+    send_message(stream['conn'], response_obj)
+
+def add_piece_record(hash, length):
+    # update state of known pieces
+    pass
+
+def process_file(file_path):
+    f = open(file_path, 'rb')
+    data = f.read()
+    length = len(data)
+    digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
+    digest.update(data)
+    hash = digest.finalize().hex()
+    shutil.copyfile(file_path, "data/pieces/" + hash)
+    add_piece_record(hash, length)
+    return hash
+
 
 def initialize_dht():
     # initialize global DHT
@@ -1026,11 +1116,26 @@ class BiblionRPCRequestHandler(http.server.BaseHTTPRequestHandler):
                 elif parsed_data['command'] == 'dht_find_value':
                     pass
                 elif parsed_data['command'] == 'fetch_file':
-                    do_fetch()
+                    response_data += do_fetch(parsed_data)
                 elif parsed_data['command'] == 'add_file':
+                    file_path = parsed_data['path']
                     # process file and add to filestore
+                    file_hash = process_file(file_path)
+                    # TODO XXX for now this code assumes the default global identity
                     # publish to DHT
-                    pass
+                    message = {
+                        'hash': file_hash,
+                        'pubbits': get_pubbits().decode('utf-8'),
+                        'addrs': collect_addresses(None),
+                        'time': time.time()
+                    }
+                    signature = private_key.sign(json.dumps(message, sort_keys=True).encode('utf-8'),
+                                                 ec.ECDSA(hashes.SHA256()))
+                    signed_message = {'message': message, 'sig': base64.b64encode(signature).decode('utf-8')}
+                    print("Processed file %s\n" % signed_message)
+                    file_hash_b64 = base64.b64encode(bytes.fromhex(file_hash)).decode('utf-8')
+                    kademlia_do_store(file_hash_b64, signed_message)
+                    response_data += "Added and announced as %s\n" % file_hash
                 elif parsed_data['command'] == 'add_file_to_library':
                     # create metadata record
                     # add to library's merkle root for metadata
