@@ -25,7 +25,6 @@ Why not just make a giant mega-community?
   are not uploading illegal or disgraceful content. Without moderation, who
   would participate in such a community?
 
-
 If I upload my content, will it live forever?
 
   Maybe! Biblion allows users to backup other peoples content. This means that
@@ -54,7 +53,7 @@ How does this compare to existing World Wide Web?
 
 How does this compare to other decentralized web technologies?
 
-  There are many technolgies appearing for building out the decentralized web,
+  There are many technologies appearing for building out the decentralized web,
   and all of these technologies are related.
 
   Each have their strengths and weaknesses.

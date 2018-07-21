@@ -14,13 +14,13 @@ import socketserver
 
 import gevent
 from gevent.event import Event
-from flask import Flask
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from log import log
 
 
 public_key = None
@@ -45,81 +45,6 @@ tcp_socket = None
 
 _global_port = None
 
-def listen_for_connections(port):
-    # lmao, this hack should absolutely not be here
-    global _global_port
-    _global_port = port
-    # XXX Listening on ipv6 should help remove NAT troubles, but it probably isn't widely supported
-    global tcp_socket
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        tcp_socket = sock
-        sock.bind(("127.0.0.1", port))
-        sock.listen(50)
-
-        print("Now listening on TCP socket", port)
-
-        while True:
-            conn, addr = sock.accept()
-            print("Accepting new connection")
-            gevent.spawn(handle_connection, conn)
-            gevent.sleep(0)
-
-def listen_for_datagrams(port):
-    # UDP messages can be DHT messages, or messages in a DTLS session (useful for getting around NAT)
-    # TODO XXX We should also support uTP streams at some point. QUIC looks great. Supports transport-layer multiplexing
-    # Also check out UDP over ipv6, including with IPsec.
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-        sock.bind(("127.0.0.1", port))
-
-        print("Now listening on UDP socket", port)
-
-        while True:
-            # should probably set message state and include address or some shit
-            # that way we can check "connection" info even on a connectionless basis
-            (message, _, _, address) = sock.recvmsg(65536)
-            # TODO XXX need to generate conn context
-            # It can be a pseudo connection, but it needs to have the context of how to reply to the message
-            handle_message(conn, message)
-
-
-# Messages will be handled asynchronously. Each request has
-# a number. We have to send a reply with the same request number. This allows
-# us to have multiple requests and messages in flight at any time.
-
-def listen_for_messages(node_id):
-    conn = connections[node_id]
-    while conn['connected']:
-        message = recv_message(conn['socket'])
-        message = sym_decrypt(message, conn['session_key'])
-        handle_message(conn, message)
-        # TODO handle disconnect
-
-def handle_message(conn, message):
-    # For now, each message will be a JSON object describing the packet
-    # Each packet should have a streamId that represents an RPC or data flow
-
-    global active_streams
-
-    # TODO Streams can have expiration time
-    message = json.loads(message)
-    inner_msg = message['data']
-    stream_id = message['streamId']
-    if stream_id in active_streams:
-        stream = active_streams[stream_id]
-        stream['data'].append(inner_msg)
-        stream['event'].set()
-    else:
-        active_streams[stream_id] = {'data': [inner_msg],
-                                     'event': Event(),
-                                     'open': True,
-                                     'conn': conn,
-                                     'header': build_stream_header_from_message(message)}
-        gevent.spawn(handle_new_request, active_streams[stream_id])
-
-    if 'closeStream' in message:
-        active_streams[stream_id]['open'] = False
-        del active_streams[stream_id]
-
 def handle_new_request(stream):
     """
     Temporary generic request handler for biblion.
@@ -132,7 +57,7 @@ def handle_new_request(stream):
     message = stream['data'].pop()
     mt = message['type']
 
-    print("Received message %s, %s\n" % (stream, message))
+    log("Received message %s, %s\n" % (stream, message))
 
     # over udp
     if mt == 'ping':
@@ -185,205 +110,49 @@ def handle_new_request(stream):
         pass
 
 
-def pub_to_nodeid(pubkey):
-    pub_bits = pubkey.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
-    )
-    return pubbits_to_nodeid(pub_bits)
-
-def pubbits_to_nodeid(pubbits):
-    digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
-    digest.update(pubbits)
-    return base64.b64encode(digest.finalize()).decode("utf-8")
-
-def get_pubbits():
-    return public_key.public_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PublicFormat.SubjectPublicKeyInfo
-    )
-
 def libbiblion_init(pubkey, privkey):
     global public_key, private_key
     public_key = pubkey
     private_key = privkey
 
-def encode_message(data):
-    if type(data) == str:
-        data = data.encode('utf-8')
-    length = len(data)
-    encoded_length = struct.pack('I', length)
-    return encoded_length + data
-
-def recv_message(sock):
-    encoded_length = sock.recv(4)
-    length = struct.unpack('I', encoded_length)[0]
-    return sock.recv(length)
-
-def handle_connection(client_socket):
-    """
-    Server-side of persistent connection handshake
-    """
-
-    global connections, _next_stream_id
-
-    # Request 1: local public key, challenge
-    req = recv_message(client_socket)
-    message = json.loads(req)
-    nonce_challenge = message['nonce']
-
-    # Response 1: challenge answer, foreign public key, new challenge
-    node_pubkey = serialization.load_pem_public_key(message['pub'].encode('utf-8'),
-                                                    default_backend())
-    nonce = random.randint(0, (2**32)-1)
-    signature = private_key.sign(struct.pack('I', nonce_challenge),
-                                 ec.ECDSA(hashes.SHA256()))
-    resp = json.dumps({'pub': get_pubbits().decode('utf-8'),
-                       'nonce': nonce,
-                       'sig': base64.b64encode(signature).decode('utf-8')})
-    client_socket.sendall(encode_message(resp))
-
-    # Request 2: new challenge answer
-    req2 = recv_message(client_socket)
-    message2 = json.loads(req2)
-    try:
-        node_pubkey.verify(base64.b64decode(message2['sig']),
-                           struct.pack('I', nonce),
-                           ec.ECDSA(hashes.SHA256()))
-    except:
-        print("Signature of other node could not be verified")
-
-    # End: ECDH
-    shared_key = private_key.exchange(ec.ECDH(), node_pubkey)
-
-    node_id = pub_to_nodeid(node_pubkey)
-    ip, port = client_socket.getpeername()
-    print("Successfully connected to", node_id)
-    connections[node_id] = {'pubkey': node_pubkey,
-                            'node_id': node_id,
-                            'session_key': shared_key,
-                            'ip': ip,
-                            'port': port,
-                            'type': 'listener',
-                            'socket': client_socket,
-                            'connected': True}
-
-    _next_stream_id += 1  # listener uses even stream IDs
-    listen_for_messages(node_id)
-
-
-def connect(node):
-    """
-    Dialer-side of persistent connection handshake
-    """
-
-    global connections
-
-    # WARNING: This can be MITM'd. The public key/id should be known before
-    # connecting. This can be derived from the DHT list (or hardcoded for the bootstrap node(s))
-
-    # Connect
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((node['address'], node['port']))
-
-    # Request 1: local public key, challenge
-    nonce = random.randint(0, (2**32)-1)
-    req1 = json.dumps({'pub': get_pubbits().decode('utf-8'), 'nonce': nonce})
-    sock.sendall(encode_message(req1))
-
-    # Response 1: challenge answer, foreign public key, new challenge
-    message = recv_message(sock)
-    message = json.loads(message)
-    node_pubkey = serialization.load_pem_public_key(message['pub'].encode('utf-8'),
-                                                    default_backend())
-    nonce_challenge = message['nonce']
-    try:
-        node_pubkey.verify(base64.b64decode(message['sig']),
-                           struct.pack('I', nonce),
-                           ec.ECDSA(hashes.SHA256()))
-    except:
-        print("Exception! Signature of other node could not be verified")
-
-    # Request 2: new challenge answer
-    signature = private_key.sign(struct.pack('I', nonce_challenge),
-                                 ec.ECDSA(hashes.SHA256()))
-    req2 = json.dumps({'sig': base64.b64encode(signature).decode('utf-8')})
-    sock.sendall(encode_message(req2))
-
-    # End: ECDH
-    # WARNING WARNING the python cryptography library uses ephemeral ecdh (ECDHE),
-    # which means it will generate the same shared secret every time!
-    # Instead we should be establishing TLS connections between nodes
-    shared_key = private_key.exchange(ec.ECDH(), node_pubkey)
-
-    node_id = pub_to_nodeid(node_pubkey)
-    print("Successfully connected to", node_id)
-    connections[node_id] = {'node_id': node_id,
-                            'pubkey': node_pubkey,
-                            'session_key': shared_key,
-                            'ip': node['address'],
-                            'port': node['port'],
-                            'socket': sock,
-                            'type': 'dialer',
-                            'connected': True}
-
-    gevent.spawn(listen_for_messages, node_id)
-    send_hello(connections[node_id])
-
-def collect_addresses(node_id):
-    """
-    Returns the internet addresses for the given peer id. This returns addresses
-    for the currently running node.
-    """
-    return {'ipv4': [('127.0.0.1', _global_port)]}
-
-def collect_protocols(node_id):
-    """
-    Returns the library:protocol pairs for the given node id. This represents
-    nodes running on our current instance
-    """
-    # XXX TODO actually check what libraries we are a member of.
-    return {'_global': ['dht']}
-
-def send_hello(conn):
+def send_hello(peer):
     # message should include our public addresses, our public library memberships, and our services for each library
 
     message = {'type': 'hello',
                'payload': {
                     # TODO XXX need to get our current peer id for the current connection
-                   'addrs': collect_addresses(None),
-                   'libraries': collect_protocols(None)
+                   'addrs': peer.identity.collect_addresses(),
+                   'libraries': peer.identity.collect_protocols()
                }}
 
-    response = send_request_sync(conn, message)
+    response = peer.send_request_sync(1, message)  # TODO XXX protocol 1 is generic Biblion protocol
     response = response[0]['payload']
-    print("got HELLO response")
+    log("got HELLO response")
 
     # TODO process library memberships in response or something
-    conn['addrs'] = response['addrs']
-    _kademlia_add_node(conn)
+    peer.addresses = response['addrs']
+    _kademlia_add_node(peer, {'addrs': response['addrs'], 'peer_id': peer.peer_id})
 
 def handle_hello(stream, request):
     # record libraries and services provided by node
-
-    print("Handling HELLO")
+    log("Handling HELLO")
 
     stream['conn']['addrs'] = request['addrs']
     response = {'type': 'hello',
-                'payload': {'addrs': collect_addresses(None),
-                            'libraries': collect_protocols(None)}}
+                'payload': {'addrs': stream['peer'].identity.collect_addresses(),
+                            'libraries': stream['peer'].identity.collect_protocols()}}
     response_obj = copy(stream['header'])
     response_obj['data'] = response
     response_obj['closeStream'] = True
-    send_message(stream['conn'], response_obj)
-    _kademlia_add_node(stream['conn'])
+    stream['peer'].send_message(stream['conn'], response_obj)
+    _kademlia_add_node(stream['peer'], {'addrs': request['addrs'], 'peer_id': stream['peer'].peer_id})
 
 _signed_id = None
 def _get_signed_id():
     # TODO XXX this isn't used yet. We trade peer information in the HELLO message
     global _signed_id
     if not _signed_id or _signed_id['timestamp'] > _1_hour_ago:
-        id = {'node_id': own_id,
+        id = {'peer_id': own_id,
               'address': {'family': 'ipv4', 'nat': 'open', 'address': get_address(), 'port': get_port()},
               'timestamp': timestamp_now()}
         json_id = json.dumps(id, sort_keys=True)
@@ -400,62 +169,6 @@ def send_datagram(address, port, message, is_request=False):
         _next_req_id += 1
     encoded_message = json.dumps(message, sort_keys=True)
     dsock.sendto(message, (address, port))
-
-def sym_decrypt(message, key):
-    aesgcm = AESGCM(key)
-    return aesgcm.decrypt(b'\x01', message, None)
-
-def sym_encrypt(message, key):
-    aesgcm = AESGCM(key)
-    return aesgcm.encrypt(b'\x01', message, None)
-
-def send_message(conn, message):
-    message = json.dumps(message).encode('utf-8')
-    enc_msg = encode_message(sym_encrypt(message, conn['session_key']))
-    conn['socket'].sendall(enc_msg)
-
-def build_stream_header_from_message(message):
-    return build_stream_header(message['protocolId'],
-                               message['streamId'],
-                               message.get('libraryId'))
-
-def build_stream_header(protocol_id, stream_id, library_id):
-    header = {'protocolId': protocol_id, 'streamId': stream_id}
-    if library_id:
-        header['libraryId'] = library_id
-    return header
-
-def create_stream(conn, protocol_id, library_id=None):
-    global _next_stream_id
-    active_streams[_next_stream_id] = {'data': [],
-                                       'event': Event(),
-                                       'open': True,
-                                       'conn': conn}
-    header = build_stream_header(protocol_id, _next_stream_id, library_id)
-    active_streams[_next_stream_id]['header'] = header
-    msg_id = _next_stream_id
-    _next_stream_id += 2
-    return msg_id
-
-def send_request_sync(conn, request):
-    # Sends a request and waits for a response from the remote peer.
-    # Create a stream context with a protocol and library information
-    # These will be used to initialize the stream
-    # Send the request in the first packets.
-    # Await the response from the other side.
-
-    stream_id = create_stream(conn, 1)  # TODO XXX protocol 1 is generic Biblion protocol
-    message = copy(active_streams[stream_id]['header'])
-    message['openStream'] = True
-    message['data'] = request
-    send_message(conn, message)
-
-    stream = active_streams[stream_id]
-    while stream['open']:
-        stream['event'].wait()
-        stream['event'].clear()
-
-    return stream['data']
 
 def start_bank(library):
     # this function probably isn't needed but i wanted to write some notes
@@ -482,21 +195,21 @@ def do_fetch(fetch_data):
 
     for peer in connected_peers:
         # TODO XXX, we should wait for at least 5 peers to respond and choose the ones with the lowest ping. warning: those chosen nodes may have bad pricing!
-        node_id = pubbits_to_nodeid(peer['pubbits'].encode('utf-8'))
-        if node_id in connections:
-            conn = connections[node_id]
+        peer_id = identity.pubbits_to_nodeid(peer['pubbits'].encode('utf-8'))
+        if peer_id in connections:
+            conn = connections[peer_id]
         else:
-            connect(node_id, peer['addrs'])
+            connect(peer_id, peer['addrs'])
             # TODO XXX verify connection succeeded
-            conn = connections[node_id]
+            conn = connections[peer_id]
         piece_query = {'type': 'query_pieces',
                        'payload': {'files': [fetch_data['id']]}}
         res = send_request_sync(conn, piece_query)[0]['payload']
         if res['have']:
-            print("Peer has data: ", res)
+            log("Peer has data: %s" % res)
             price = res['price']
             if price != 0:
-                print("Can't handle micropayment based downloads yet")
+                log("Can't handle micropayment based downloads yet")
                 return
             # TODO need to confirm price is correct. to start, we can simply use bits as price, and disconnect from nodes that misbehave
             if False and res['isTorrent']:
@@ -531,7 +244,7 @@ def do_fetch(fetch_data):
                 hash = digest.finalize().hex()
 
                 if hash != fetch_data['id']:
-                    print("Transferred data was incorrect!")
+                    log("Transferred data was incorrect!")
                     raise
 
                 tmpfile = open('/tmp/bibtemp', 'w')
@@ -594,43 +307,43 @@ def _kademlia_nearest_bucket(n):
                 return ((31-i)*8) + e
             e -= 1
 
-def _kademlia_nearest_nodes(node_id):
+def _kademlia_nearest_nodes(peer_id):
     # keep returning neighbors near n until there are none left
-    node_id_bin = _util_nodeid_to_bits(node_id)
+    peer_id_bin = _util_nodeid_to_bits(peer_id)
     # optimization: just return all nodes if less than k. TODO only enable after testing the normal way.
     # if len(kademlia_state['active_nodes']) <= KADEMLIA_K:
     #     return list(kademlia_state['active_nodes'].values())
-    return _k_trie_get_closest(node_id_bin)
+    return _k_trie_get_closest(peer_id_bin)
 
-def _k_trie_remove_node(node_id_bin):
+def _k_trie_remove_node(peer_id_bin):
     # Remove a node from the trie
 
     # TODO XXX None of this code is thread safe lol
 
     trie_root = kademlia_state['trie']
 
-    if trie_root['leaf'] and trie_root['leaf']['node_id'] != node_id_bin:
-        print("Trie does not have requested node")
+    if trie_root['leaf'] and trie_root['leaf']['peer_id'] != peer_id_bin:
+        log("Trie does not have requested node")
         return
     elif not trie_root['leaf'] and not trie_root['children']:
-        print("Empty trie")
+        log("Empty trie")
         return
 
-    node_id_index = 0
+    peer_id_index = 0
     current_node = trie_root
     last_parent = None
     while current_node['leaf'] is None:
-        while node_id_index < len(current_node['prefix']):
-            if current_node['prefix'][node_id_index] != node_id_bin[node_id_index]:
-                print("Node could not be found")
+        while peer_id_index < len(current_node['prefix']):
+            if current_node['prefix'][peer_id_index] != peer_id_bin[peer_id_index]:
+                log("Node could not be found")
                 return
-            node_id_index += 1
+            peer_id_index += 1
         last_parent = current_node
         current_node['count'] -= 1
-        current_node = current_node['children'][node_id_bin[node_id_index]]
+        current_node = current_node['children'][peer_id_bin[peer_id_index]]
 
     if last_parent:
-        other_branch = '0' if node_id_bin[node_id_index] == '1' else '1'
+        other_branch = '0' if peer_id_bin[peer_id_index] == '1' else '1'
         old_branch = last_parent['children'][other_branch]
         if old_branch['children']:
             last_parent['children'] = old_branch['children']
@@ -647,20 +360,20 @@ def _k_trie_remove_node(node_id_bin):
 
 def _k_trie_add_node(node_object):
     trie_root = kademlia_state['trie']
-    node_id = node_object['node_id_bin']
+    peer_id = node_object['peer_id_bin']
 
-    node_id_index = 0
+    peer_id_index = 0
     current_node = trie_root
     while True:
         if current_node['children']:
             # The node is a branch node, iterate into branch
-            while node_id_index < len(current_node['prefix']) and current_node['prefix'][node_id_index] == node_id[node_id_index]:
-                node_id_index += 1
+            while peer_id_index < len(current_node['prefix']) and current_node['prefix'][peer_id_index] == peer_id[peer_id_index]:
+                peer_id_index += 1
 
-            if node_id_index == len(current_node['prefix']):
+            if peer_id_index == len(current_node['prefix']):
                 # the prefix matches. iterate down.
                 current_node['count'] += 1
-                current_node = current_node['children'][node_id[node_id_index]]
+                current_node = current_node['children'][peer_id[peer_id_index]]
             else:
                 # new to add new branch here
                 branched_node = {'children': current_node['children'],
@@ -668,13 +381,13 @@ def _k_trie_add_node(node_object):
                                  'leaf': None,
                                  'count': current_node['count']}
                 current_node['count'] += 1
-                current_node['children'][node_id[node_id_index]] = {'leaf': node_object,
+                current_node['children'][peer_id[peer_id_index]] = {'leaf': node_object,
                                                                     'children': {},
                                                                     'count': 1}
-                current_node['children'][current_node['prefix'][node_id_index]] = branched_node
-                current_node['prefix'] = current_node['prefix'][:node_id_index]  # truncate the prefix to represent the new branch
+                current_node['children'][current_node['prefix'][peer_id_index]] = branched_node
+                current_node['prefix'] = current_node['prefix'][:peer_id_index]  # truncate the prefix to represent the new branch
                 return
-        elif current_node['leaf'] and current_node['leaf']['node_id'] == node_id:
+        elif current_node['leaf'] and current_node['leaf']['peer_id'] == peer_id:
             # This ID is already in the trie. Give up.
             # TODO Maybe this should be where we update the record and kbuckets? Hmm, probably that should be in other code
             return
@@ -682,21 +395,21 @@ def _k_trie_add_node(node_object):
             # We need to branch the trie at this point. We find the first
             # uncommon bitstarting at the current index and then branch at that
             # bit.
-            while current_node['leaf']['node_id'][node_id_index] == node_id[node_id_index]:
+            while current_node['leaf']['peer_id'][peer_id_index] == peer_id[peer_id_index]:
                 # This is safe because we check if the node ids are equal above.
                 # There must be a difference in the nodes
-                node_id_index += 1
+                peer_id_index += 1
 
             # Move current leaf into branch
-            current_node['prefix'] = node_id[:node_id_index]
-            current_node['children'][current_node['leaf']['node_id'][node_id_index]] = {'leaf': current_node['leaf'],
+            current_node['prefix'] = peer_id[:peer_id_index]
+            current_node['children'][current_node['leaf']['peer_id'][peer_id_index]] = {'leaf': current_node['leaf'],
                                                                                         'children': {},
                                                                                         'count': 1}
             current_node['count'] += 1
             current_node['leaf'] = None
 
             # Add new node as child
-            current_node['children'][node_id[node_id_index]] =  {'leaf': node_object,
+            current_node['children'][peer_id[peer_id_index]] =  {'leaf': node_object,
                                                                  'children': {},
                                                                  'count': 1}
             return
@@ -713,7 +426,7 @@ def _k_trie_collect_leaves(node):
     else:
         return _k_trie_collect_leaves(node['children']['0']) + _k_trie_collect_leaves(node['children']['1'])
 
-def _k_trie_get_closest(node_id):
+def _k_trie_get_closest(peer_id):
     trie_root = kademlia_state['trie']
     results = []
 
@@ -744,7 +457,7 @@ def _k_trie_get_closest(node_id):
 
         if current_node['children']:
             # The node is a branch node, choose the best branch to iterate to
-            branch_bit = node_id[len(current_node['prefix'])]
+            branch_bit = peer_id[len(current_node['prefix'])]
             n_branch_bit = '0' if branch_bit == '1' else '1'
             if current_node['prefix'] + branch_bit not in used_prefixes:
                 next_node = current_node['children'][branch_bit]
@@ -801,31 +514,31 @@ def _kademlia_queue_add(node):
     pass
 
 
-def _kademlia_add_node(request):
+def _kademlia_add_node(peer, request):
     """
     When we see a node in a response, we check if we have it in our global datastore by checking a global hashmap.
     If so, we update the node’s last-seen timestamp (using the reference from the hash map). If it’s in a K-bucket, we move it to the front of the k-bucket.
     If not, we check if it belongs in the sibling list. If not, we check its target k-bucket. We verify whether the other nodes in the list are live if needed.
     """
     # TODO XXX make this thread safe
-    node_id = request['node_id']
-    own_id = pub_to_nodeid(public_key)
+    peer_id = request['peer_id']
+    own_id = peer.identity.pub_to_nodeid(public_key)
 
-    if node_id == own_id:
+    if peer_id == own_id:
         # We don't add ourselves to the DHT. It's unnecessary
         return
 
     addresses = request['addrs']
 
-    if node_id in kademlia_state['active_nodes']:
+    if peer_id in kademlia_state['active_nodes']:
         # TODO should be moved to end of list?
-        kademlia_state['active_nodes'][node_id]['last_seen_timestamp'] = time.time()
+        kademlia_state['active_nodes'][peer_id]['last_seen_timestamp'] = time.time()
         return
-    xor_distance_int = _node_xor_distance(own_id, node_id)
+    xor_distance_int = _node_xor_distance(own_id, peer_id)
 
     new_node = {
-        'node_id': node_id,
-        'node_id_bin': _util_nodeid_to_bits(node_id),
+        'peer_id': peer_id,
+        'peer_id_bin': _util_nodeid_to_bits(peer_id),
         'addrs': addresses,
         'last_seen_timestamp': time.time()
     }
@@ -841,7 +554,7 @@ def _kademlia_add_node(request):
         # XXX O(n) performance sink :(
         # find the max and kick it out into the k buckets
         for node in kademlia_state['siblings']:
-            sibling_distance = _node_xor_distance(own_id, node['node_id'])
+            sibling_distance = _node_xor_distance(own_id, node['peer_id'])
             if s_xor_distance_int == kademlia_state['siblings']['max']:
                 _kademlia_remove_node(node)
                 # Queue the node for re-addition. This will place it in the kbuckets
@@ -861,12 +574,15 @@ def _kademlia_add_node(request):
             # TODO XXX ensure the ping result removed the node
             nearest_bucket.append(new_node)  # add the new node
 
+    # TODO add record to peer store if necessary
+
+
     # Add the node to the trie
     _k_trie_add_node(new_node)
 
-def _util_nodeid_to_bits(node_id):
-    node_id_bytes = base64.b64decode(node_id)
-    return _util_convert_bytestring_to_bits(node_id_bytes)
+def _util_nodeid_to_bits(peer_id):
+    peer_id_bytes = base64.b64decode(peer_id)
+    return _util_convert_bytestring_to_bits(peer_id_bytes)
 
 def _util_convert_bytestring_to_bits(bytes):
     # this function shouldn't be needed in the rust version. we can just bit-twiddle in the trie
@@ -886,7 +602,7 @@ def kademlia_find_node(stream, request, query=None):
     """
 
     if not query:
-        print("FIND query should specify NODE or VALUE")
+        log("FIND query should specify NODE or VALUE")
         return
 
     # TODO XXX enable when using UDP DHT
@@ -910,7 +626,7 @@ def kademlia_find_value(request):
     """
     Returns the value if we have it, or return the k nearest nodes to the node.
     """
-    req_id = request['node_id']
+    req_id = request['peer_id']
     if req_id in kademlia_state['data_store']:
         results = kademlia_state['data_store']['req_id']
     else:
@@ -920,7 +636,7 @@ def kademlia_find_value(request):
 
 def kademlia_do_ping():
     connection = connections[node]
-    msg = kademlia_generate_msg(PING, node_id)
+    msg = kademlia_generate_msg(PING, peer_id)
     # TODO: needs to generate signature
     # TODO: wait for PONG response and confirm signature and address match of node
         # TODO: Need to create closure or request record with timeout
@@ -933,12 +649,13 @@ def kademlia_ping(request):
         _kademlia_queue_add(request)
     send_message(generate_kademlia_pong(request))
 
-def kademlia_send_find_node(node_id):
+def kademlia_send_find_node(peer_id):
     msg = {'type': 'kademlia_find_node',
-           'payload': {'nodeId': node_id}}
-    print("Sending FIND_NODE to ", node_id)
-    if node_id in connections:
-        return send_request_sync(connections[node_id], msg)[0]['payload']
+           'payload': {'nodeId': peer_id}}
+    log("Sending FIND_NODE to %s" % peer_id)
+    peer = Identity.get_peer(peer_id)
+    if peer_id in connections:
+        return send_request_sync(connections[peer_id], msg)[0]['payload']
     else:
         # TODO use UDP. This should be abstracted away as far as possible
         address, port = get_ipv4_address(node)
@@ -952,7 +669,7 @@ def _kademlia_continue_lookup(lookup_id, msg):
     # Continue lookup until the k nearest nodes have replied
     # TODO for S/Kademlia, I suppose we have to be smarter about disjoint paths?
 
-def kademlia_do_lookup(node_id, type="node"):
+def kademlia_do_lookup(peer_id, type="node"):
     # TODO, this function should be able to handle both FIND_NODE and FIND_VALUE
 
     # lookup_id = random()
@@ -961,11 +678,11 @@ def kademlia_do_lookup(node_id, type="node"):
 
     if type == 'value':
         # TODO XXX when this inevitably fails, we should send_find_value below
-        if node_id in kademlia_state['data_store']:
-            return kademlia_state['data_store'][node_id]
+        if peer_id in kademlia_state['data_store']:
+            return kademlia_state['data_store'][peer_id]
 
     nearest_nodes = []
-    for node in _kademlia_nearest_nodes(node_id):
+    for node in _kademlia_nearest_nodes(peer_id):
         nearest_nodes.append(node)
         if len(nearest_nodes) >= KADEMLIA_K:
             break
@@ -983,10 +700,10 @@ def kademlia_do_lookup(node_id, type="node"):
     accessed_nodes = []
 
     # TODO this assumes the global connection
-    own_id = pub_to_nodeid(public_key)
+    own_id = identity.pub_to_nodeid(public_key)
 
     def _xor_with(nid):
-        return lambda n: _node_xor_distance(nid, n['node_id'])
+        return lambda n: _node_xor_distance(nid, n['peer_id'])
 
     for path in dpaths.values():  # greenlet for each
         sorted_path = sorted(path, key=_xor_with(own_id))
@@ -1003,13 +720,13 @@ def kademlia_do_lookup(node_id, type="node"):
             break
         accessed_nodes.append(current_node)  # synchronized
         # XXX ah, we need to mark if the node actually responded. Not just if it was queried. That makes things more ugly. sigh...
-        new_nodes = kademlia_send_find_node(current_node['node_id'])
+        new_nodes = kademlia_send_find_node(current_node['peer_id'])
         # TODO XXX need to enable this for UDP kademlia
         #if confirm_sig(node):
         #   _kademlia_queue_add(node)
 
         # TODO XXX I think this is for when this code should support FIND_VALUE
-        #if node_id in new_nodes:
+        #if peer_id in new_nodes:
         #    return
 
 
@@ -1018,7 +735,7 @@ def kademlia_do_lookup(node_id, type="node"):
         # Hm, we should definitely be STORE the value if we're among the siblings for the key.
         to_remove = []
         for node in new_nodes:
-            if node['node_id'] == own_id:
+            if node['peer_id'] == own_id:
                 to_remove.append(node)
         for node in to_remove:
             new_nodes.remove(node)
@@ -1039,7 +756,7 @@ def kademlia_do_random_walk():
             closest_bucket = bucket
             break
     else:
-        print("No K-buckets populated? Oh no...")
+        log("No K-buckets populated? Oh no...")
         return
 
     for i in range(closest_bucket):
@@ -1058,14 +775,14 @@ def kademlia_do_store(key_id, value):
     store_request = {'type': 'kademlia_publish',
                      'payload': {'key': key_id, 'value': value}}
     for node in nearest_nodes:
-        if node['node_id'] in connections:
-            conn = connections[node['node_id']]
+        if node['peer_id'] in connections:
+            conn = connections[node['peer_id']]
             send_request_sync(conn, store_request)
             # TODO check result
         else:
             # TODO need to send udp message and wait for response, getting handshake cookie if necessary
             # Alternatively, connect to node with TCP and send them the STORE as normal
-            print("Tried to send STORE to unconnected node")
+            log("Tried to send STORE to unconnected node")
             pass
 
 def kademlia_store(stream, request):
@@ -1081,7 +798,7 @@ def kademlia_store(stream, request):
     store_request = request['value']['message']
     if store_request['time'] < _24_hours_ago:
         # Ignore stale STOREs
-        print("received stale STORE")
+        log("received stale STORE")
         return
 
     peer_pubbits = store_request['pubbits'].encode('utf-8')
@@ -1092,9 +809,9 @@ def kademlia_store(stream, request):
                            json.dumps(store_request, sort_keys=True).encode('utf-8'),
                            ec.ECDSA(hashes.SHA256()))
     except:
-        print("received invalid STORE")
-        print(store_request)
-        print(peer_pubbits)
+        log("received invalid STORE")
+        log(store_request)
+        log(peer_pubbits)
         return
 
     # TODO: enforce storage limits
@@ -1179,9 +896,9 @@ class BiblionRPCRequestHandler(http.server.BaseHTTPRequestHandler):
             parsed_data = json.loads(input_data)
 
             if 'command' in parsed_data:
-                if parsed_data['command'] == 'print_dht':
+                if parsed_data['command'] == 'log_dht':
                     response_data += "Current Kademlia DHT state:\n"
-                    response_data += "Our node id: %s\n" % pub_to_nodeid(public_key)
+                    response_data += "Our node id: %s\n" % identity.pub_to_nodeid(public_key)
                     response_data += json.dumps(kademlia_state)
                 elif parsed_data['command'] == 'reset_dht':
                     pass
@@ -1206,14 +923,14 @@ class BiblionRPCRequestHandler(http.server.BaseHTTPRequestHandler):
                     # publish to DHT
                     message = {
                         'hash': file_hash,
-                        'pubbits': get_pubbits().decode('utf-8'),
+                        'pubbits': identity.get_pubbits().decode('utf-8'),
                         'addrs': collect_addresses(None),
                         'time': time.time()
                     }
                     signature = private_key.sign(json.dumps(message, sort_keys=True).encode('utf-8'),
                                                  ec.ECDSA(hashes.SHA256()))
                     signed_message = {'message': message, 'sig': base64.b64encode(signature).decode('utf-8')}
-                    print("Processed file %s\n" % signed_message)
+                    log("Processed file %s\n" % signed_message)
                     file_hash_b64 = base64.b64encode(bytes.fromhex(file_hash)).decode('utf-8')
                     kademlia_do_store(file_hash_b64, signed_message)
                     response_data += "Added and announced as %s\n" % file_hash
@@ -1249,12 +966,12 @@ def shutdown_sockets():
     if tcp_socket:
         # TODO XXX each connection should get a chance to GOAWAY and clean up
         # also need to kill any active UDP activity
-        print("Shutting down TCP socket")
+        log("Shutting down TCP socket")
         tcp_socket.close()
 
 def shutdown_json_rpc():
     if httpd_instance:
-        print("Shutting down JSON-RPC server")
+        log("Shutting down JSON-RPC server")
         httpd_instance.shutdown()
 
 def start_json_rpc(port):
@@ -1262,11 +979,11 @@ def start_json_rpc(port):
 
     with socketserver.TCPServer(("", port), BiblionRPCRequestHandler) as httpd:
         httpd_instance = httpd
-        print("serving at port", port)
+        log("serving at port: %s" % port)
         try:
             httpd.serve_forever()
         except:
-            print("Exception occurred in HTTP server")
-        print("Cleaning up JSON-RPC TCPServer")
+            log("Exception occurred in HTTP server")
+        log("Cleaning up JSON-RPC TCPServer")
 
     httpd_instance = None
