@@ -1,10 +1,307 @@
+import base64
+import json
+import random
+import socket
+import struct
 
-class TCPConnection(object):
+import gevent
+from gevent.event import Event
+
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+from crypto_util import *
+from log import log
+
+class Stream(object):
+    """
+    Represents an active stream. A stream is a set of packets sent over a
+    communications channel. A stream can have the following optional attributes:
+        - reliable
+        - encrypted
+    Later, streams will have other features such as masking your IP. These features
+    are provided by the channel the stream runs over.
+    """
+
+    # TODO Streams should have expiration time
+
+    def __init__(self, transport, connection, protocol_id, library_id, stream_id=None):
+        self.transport = transport
+        self.connection = connection
+        self.protocol_id = protocol_id
+        self.library_id = library_id
+        if not stream_id:
+            stream_id = connection['next_stream_id']
+            connection['next_stream_id'] += 2
+        self.stream_id = stream_id
+
+        self._opened = False
+        self.data = []
+        self.open = True
+        self.event = Event()
+
+    def _get_header(self):
+        header = {'protocolId': self.protocol_id,
+                  'streamId': self.stream_id}
+        if self.library_id:
+            header['libraryId'] = self.library_id
+        return header
+
+    def build_stream_header_from_message(self, message):
+        return self.build_stream_header(message['protocolId'],
+                                        message['streamId'],
+                                        message.get('libraryId'))
+
+    def send_message(self, data, close=False):
+        message = self._get_header()
+        if not self._opened:
+            self._opened = True
+            message['openStream'] = True
+        message['data'] = data
+        message['closeStream'] = close
+        self.transport.send_message(self.connection, message)
+
+    def read_message(self):
+        # XXX don't use this yet... need a better way to manage the Event
+        self.event.wait()
+        return self.data[0]
+
+
+class TCPMuxed(object):
     """
     Handles sending and receiving data over a TCP connection.
     Does a crypto handshake TODO: TLS
-    Encodes messages as needed
     """
 
-    def __init__(self):
+    def __init__(self, identity, on_connect, on_stream):
+        self.identity = identity
+        self.on_connect = on_connect or (lambda x: x)
+        self.on_stream = on_stream or (lambda x: x)
+
+        self._connections = {}
+        self._active_streams = {}
+
+    def _sym_decrypt(self, message, key):
+        aesgcm = AESGCM(key)
+        return aesgcm.decrypt(b'\x01', message, None)
+
+    def _sym_encrypt(self, message, key):
+        # XXX TODO nonce re-use!
+        aesgcm = AESGCM(key)
+        return aesgcm.encrypt(b'\x01', message, None)
+
+    def _encode_message(self, data):
+        if type(data) == str:
+            data = data.encode('utf-8')
+        length = len(data)
+        encoded_length = struct.pack('I', length)
+        return encoded_length + data
+
+    def _recv_message(self, sock):
+        encoded_length = sock.recv(4)
+        length = struct.unpack('I', encoded_length)[0]
+        return sock.recv(length)
+
+    def _new_connection(self, connected_socket, peer_id, session_key, is_listener):
+        new_conn = {
+            'socket': connected_socket,
+            'session_key': session_key,
+            'listener': is_listener,
+            'next_stream_id': 2 if is_listener else 1
+        }
+        # TODO we can do a lot more here... For example, we can have a
+        # TCP-only metaprotocol that keeps the connection alive. This way
+        # we can maintain connections even when there is not much activity.
+        # Probably importatnt for gossip protocols.
+        self._connections[peer_id] = new_conn
+        gevent.spawn(self._listen_for_messages, new_conn, peer_id)
+
+    def _handle_connection(self, connected_socket):
+        peer_id, session_key = self._handshake_listener(connected_socket)
+        self.on_connect(peer_id, self)
+        self._new_connection(connected_socket, peer_id, session_key, is_listener=True)
+
+    def _stream_router(self, peer_id, message, conn):
+        # TODO XXX need to make sure stream ids have correct parity and are not re-used
+
+        message = json.loads(message)
+        log("Received %s" % message)
+        inner_msg = message['data']
+        stream_id = message['streamId']
+        if stream_id in self._active_streams:
+            stream = self._active_streams[stream_id]
+            stream.data.append(inner_msg)
+            stream.event.set()
+        else:  # new stream
+            stream = Stream(self, conn, 1, 0, stream_id)  # TODO XXX need to read these from header
+            stream.data.append(inner_msg)
+            stream._opened = True
+            self._active_streams[stream_id] = stream
+            self.on_stream(peer_id, stream)
+
+        if 'closeStream' in message and message['closeStream']:
+            self._active_streams[stream_id].open = False
+            del self._active_streams[stream_id]
+
+    def _listen_for_messages(self, conn, peer_id):
+        while True:  # TODO XXX need to catch exceptions
+            message = self._recv_message(conn['socket'])
+            message = self._sym_decrypt(message, conn['session_key'])
+
+            self._stream_router(peer_id, message, conn)
+        # TODO handle disconnect
+
+    def _handshake_listener(self, client_socket):
+        """
+        Listener-side of TCP crypto handshake
+        THIS SHOULD BE REPLACED BY TLS
+        """
+        # Request 1: local public key, challenge
+        req = self._recv_message(client_socket)
+        message = json.loads(req)
+        nonce_challenge = message['nonce']
+
+        # Response 1: challenge answer, foreign public key, new challenge
+        node_pubkey = serialization.load_pem_public_key(message['pub'].encode('utf-8'),
+                                                        default_backend())
+        nonce = random.randint(0, (2**32)-1)
+        signature = self.identity.private_key.sign(struct.pack('I', nonce_challenge),
+                                                   ec.ECDSA(hashes.SHA256()))
+        resp = json.dumps({'pub': self.identity.get_public_bits().decode('utf-8'),
+                           'nonce': nonce,
+                           'sig': base64.b64encode(signature).decode('utf-8')})
+        client_socket.sendall(self._encode_message(resp))
+
+        # Request 2: new challenge answer
+        req2 = self._recv_message(client_socket)
+        message2 = json.loads(req2)
+        try:
+            node_pubkey.verify(base64.b64decode(message2['sig']),
+                               struct.pack('I', nonce),
+                               ec.ECDSA(hashes.SHA256()))
+        except:
+            log("Signature of other node could not be verified")
+            raise
+
+        # End: ECDH
+        shared_key = self.identity.private_key.exchange(ec.ECDH(), node_pubkey)
+
+        return pub_to_nodeid(node_pubkey), shared_key
+
+    def _handshake_dialer(self, sock, peer_id):
+        """
+        Dialer-side of persistent connection handshake
+        """
+        # Request 1: local public key, challenge
+        nonce = random.randint(0, (2**32)-1)
+        req1 = json.dumps({'pub': self.identity.get_public_bits().decode('utf-8'), 'nonce': nonce})
+        sock.sendall(self._encode_message(req1))
+
+        # Response 1: challenge answer, foreign public key, new challenge
+        message = self._recv_message(sock)
+        message = json.loads(message)
+        node_pubkey = serialization.load_pem_public_key(message['pub'].encode('utf-8'),
+                                                        default_backend())
+        nonce_challenge = message['nonce']
+
+        advertised_peer_id = public_bits_to_peer_id(message['pub'].encode('utf-8'))
+        if advertised_peer_id != peer_id:
+            log("Connected node has wrong peer id")
+            # TODO XXX raise a useful error
+            raise
+
+        try:
+            node_pubkey.verify(base64.b64decode(message['sig']),
+                               struct.pack('I', nonce),
+                               ec.ECDSA(hashes.SHA256()))
+        except:
+            log("Exception! Signature of other node could not be verified")
+
+        # Request 2: new challenge answer
+        signature = self.identity.private_key.sign(struct.pack('I', nonce_challenge),
+                                     ec.ECDSA(hashes.SHA256()))
+        req2 = json.dumps({'sig': base64.b64encode(signature).decode('utf-8')})
+        sock.sendall(self._encode_message(req2))
+
+        # End: ECDH
+        # WARNING WARNING the python cryptography library will generate the
+        # same shared secret every time!
+        # Instead we should be establishing TLS connections between nodes, and
+        # using forward secrecy
+        shared_key = self.identity.private_key.exchange(ec.ECDH(), node_pubkey)
+
+        log("Successfully connected to %s" % pub_to_nodeid(node_pubkey))
+        return shared_key
+
+    def send_message(self, conn, message):
+        log("Sending %s" % message)
+        message = json.dumps(message).encode('utf-8')
+        enc_msg = self._encode_message(self._sym_encrypt(message, conn['session_key']))
+        conn['socket'].sendall(enc_msg)
+
+    def create_stream(self, peer_id, protocol_id, library_id=None):
+        if not peer_id in self._connections:
+            # TODO establish a connection with the given peer.
+            # This means we'll need the TCP addresses of the remote peer. Hm, maybe we should pass in a peer reference instead?
+            log("XXX Shouldn't get here for now")
+            pass
+        conn = self._connections[peer_id]
+        new_stream = Stream(self, conn, protocol_id, library_id, stream_id=None)
+        self._active_streams[new_stream.stream_id] = new_stream
+        return new_stream
+
+    def mark_unneeded(self, peer_id):
+        """
+        Marks the transport as unneeded. We can clean up the connection state and
+        close the connection if needed. We should also keep track of which connections
+        haven't been used in a while and prune them automatically in the case of uncooperative
+        applications. There should also be a way for applications to mark a connection as needed
+        """
         pass
+
+    def mark_needed(self, peer_id):
+        """
+        Marks the transport as needed for the given peer_id. We should maintain
+        the connection even if nothing happens for a while
+        """
+        pass
+
+    def is_ready(self, peer_id):
+        """
+        Returns True if we have a connection to the peer
+        """
+        pass
+
+    def become_ready(self, peer):
+        # TODO This should be used instead of connect(). It can be a generic
+        # interface for all transports. Even those that aren't connection-oriented.
+        # We'll need to extract the TCP address data from the peer, and connect
+        # to it, while verifying the peer id.
+        self._connect(peer)
+
+    def connect(self, address, peer_id):
+        address, port = address
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # TODO handle connection failure
+        sock.connect((address, port))
+
+        # TODO handle handshake failure
+        session_key = self._handshake_dialer(sock, peer_id)
+        self._new_connection(sock, peer_id, session_key, is_listener=False)
+
+    def listen(self, addr, port):
+        # XXX Listening on ipv6 should help remove NAT troubles, but it probably isn't widely supported
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind((addr, port))
+            sock.listen(50)
+
+            log("Now listening on TCP socket %s" % port)
+
+            while True:
+                connected_socket, _ = sock.accept()
+                log("Accepting new connection")
+                gevent.spawn(self._handle_connection, connected_socket)
+                gevent.sleep(0)

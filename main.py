@@ -25,7 +25,8 @@ def async_suicide():
 def signal_handler(signal, frame):
         log('Shutting down...')
         gevent.spawn(libbiblion.shutdown_json_rpc)
-        gevent.spawn(libbiblion.shutdown_sockets)
+        # XXX need to call shutdown on each transport
+        #gevent.spawn(libbiblion.shutdown_sockets)
         gevent.spawn(async_suicide)
 signal.signal(signal.SIGINT, signal_handler)
 
@@ -73,19 +74,21 @@ addresses = {'ipv4': {'udp': [('127.0.0.1', port)],
                       'tcp': [('127.0.0.1', port)]}}
 identity = Identity((pub, priv), addresses)
 
-own_id = identity.pub_to_nodeid(pub)
+own_id = identity.get_own_id()
 log("STARTING BIBLION. NODE_ID %s" % own_id)
 libbiblion.libbiblion_init(pub, priv)
+
+# Start listening for messages
+identity.setup_transports()
 
 for node in known_nodes:
     if node[0] == own_id:
         # XXX need a stronger check
         # don't add self on DHT
         continue
-    peer = identity.add_or_update_peer(node[0], node[1])
-    gevent.spawn(peer.connect)
+    peer = identity.add_or_get_peer(node[0], node[1])
+    libbiblion.hello(identity, node)
 
-gevent.spawn(identity._tcp_listen, port)
 #gevent.spawn(libbiblion.listen_for_datagrams, port)
 gevent.spawn(libbiblion.start_json_rpc, port+1)
 

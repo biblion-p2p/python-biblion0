@@ -41,11 +41,10 @@ kademlia_state = {'trie': {'children': {}, 'leaf': None, 'count': 0},
 for i in range(256): kademlia_state['k_buckets'][i] = []
 
 httpd_instance = None
-tcp_socket = None
 
 _global_port = None
 
-def handle_new_request(stream):
+def handle_new_biblion_stream(stream):
     """
     Temporary generic request handler for biblion.
     Protocol 1 (Though protocol number isn't even used yet, as of this comment).
@@ -54,7 +53,7 @@ def handle_new_request(stream):
     message signaling handled per application.
     """
 
-    message = stream['data'].pop()
+    message = stream.data.pop()
     mt = message['type']
 
     log("Received message %s, %s\n" % (stream, message))
@@ -115,6 +114,12 @@ def libbiblion_init(pubkey, privkey):
     public_key = pubkey
     private_key = privkey
 
+def hello(identity, peer_info):
+    peer_id, addrs = peer_info
+    peer = identity.add_or_get_peer(peer_id)
+    peer.reserve_channel()  # establishes a TCP connection
+    send_hello(peer)
+
 def send_hello(peer):
     # message should include our public addresses, our public library memberships, and our services for each library
 
@@ -130,22 +135,23 @@ def send_hello(peer):
     log("got HELLO response")
 
     # TODO process library memberships in response or something
-    peer.addresses = response['addrs']
-    _kademlia_add_node(peer, {'addrs': response['addrs'], 'peer_id': peer.peer_id})
+    #peer.addresses = response['addrs']
+
+    #_kademlia_add_node(peer, {'addrs': response['addrs'], 'peer_id': peer.peer_id})
 
 def handle_hello(stream, request):
     # record libraries and services provided by node
     log("Handling HELLO")
 
-    stream['conn']['addrs'] = request['addrs']
+    # TODO update the addresses of the peer
+    #stream.peer.addrs = request['addrs']
     response = {'type': 'hello',
-                'payload': {'addrs': stream['peer'].identity.collect_addresses(),
-                            'libraries': stream['peer'].identity.collect_protocols()}}
-    response_obj = copy(stream['header'])
-    response_obj['data'] = response
-    response_obj['closeStream'] = True
-    stream['peer'].send_message(stream['conn'], response_obj)
-    _kademlia_add_node(stream['peer'], {'addrs': request['addrs'], 'peer_id': stream['peer'].peer_id})
+                'payload': {'addrs': stream.transport.identity.collect_addresses(),
+                            'libraries': stream.transport.identity.collect_protocols()}}
+
+    stream.send_message(response, close=True)
+
+    #_kademlia_add_node(stream['peer'], {'addrs': request['addrs'], 'peer_id': stream['peer'].peer_id})
 
 _signed_id = None
 def _get_signed_id():
@@ -195,7 +201,7 @@ def do_fetch(fetch_data):
 
     for peer in connected_peers:
         # TODO XXX, we should wait for at least 5 peers to respond and choose the ones with the lowest ping. warning: those chosen nodes may have bad pricing!
-        peer_id = identity.pubbits_to_nodeid(peer['pubbits'].encode('utf-8'))
+        peer_id = public_bits_to_peer_id(peer['pubbits'].encode('utf-8'))
         if peer_id in connections:
             conn = connections[peer_id]
         else:
@@ -522,7 +528,7 @@ def _kademlia_add_node(peer, request):
     """
     # TODO XXX make this thread safe
     peer_id = request['peer_id']
-    own_id = peer.identity.pub_to_nodeid(public_key)
+    own_id = peer.identity.get_own_id()
 
     if peer_id == own_id:
         # We don't add ourselves to the DHT. It's unnecessary
@@ -700,7 +706,7 @@ def kademlia_do_lookup(peer_id, type="node"):
     accessed_nodes = []
 
     # TODO this assumes the global connection
-    own_id = identity.pub_to_nodeid(public_key)
+    own_id = self.identity.get_own_id()
 
     def _xor_with(nid):
         return lambda n: _node_xor_distance(nid, n['peer_id'])
@@ -923,7 +929,7 @@ class BiblionRPCRequestHandler(http.server.BaseHTTPRequestHandler):
                     # publish to DHT
                     message = {
                         'hash': file_hash,
-                        'pubbits': identity.get_pubbits().decode('utf-8'),
+                        'pubbits': identity.get_public_bits().decode('utf-8'),
                         'addrs': collect_addresses(None),
                         'time': time.time()
                     }
@@ -962,13 +968,6 @@ class BiblionRPCRequestHandler(http.server.BaseHTTPRequestHandler):
         if response_data:
             self.wfile.write(response_data.encode('utf-8'))
 
-def shutdown_sockets():
-    if tcp_socket:
-        # TODO XXX each connection should get a chance to GOAWAY and clean up
-        # also need to kill any active UDP activity
-        log("Shutting down TCP socket")
-        tcp_socket.close()
-
 def shutdown_json_rpc():
     if httpd_instance:
         log("Shutting down JSON-RPC server")
@@ -979,7 +978,7 @@ def start_json_rpc(port):
 
     with socketserver.TCPServer(("", port), BiblionRPCRequestHandler) as httpd:
         httpd_instance = httpd
-        log("serving at port: %s" % port)
+        log("JSON-RPC serving at port: %s" % port)
         try:
             httpd.serve_forever()
         except:
