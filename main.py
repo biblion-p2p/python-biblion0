@@ -61,13 +61,6 @@ if not os.path.exists("data/"):
 # *~*~* Load identity *~*~*
 pub, priv = keygen.get_keys()
 
-# *~*~* Connect to bootstrap node *~*~*
-# TODO: Save list of peers from last time
-
-#BOOTSTRAP_NODE = (("127.0.0.1 put something real here",,,
-BOOTSTRAP_NODE = (global_config['bootstrap_node_id'], global_config['bootstrap_node_address'])
-known_nodes = [BOOTSTRAP_NODE]
-
 port = 8000 + (node_number * 2)
 # TODO: Support multiple peer identities
 addresses = {'ipv4': {'udp': [('127.0.0.1', port)],
@@ -76,10 +69,16 @@ identity = Identity((pub, priv), addresses)
 
 own_id = identity.get_own_id()
 log("STARTING BIBLION. NODE_ID %s" % own_id)
-libbiblion.libbiblion_init(pub, priv)
 
 # Start listening for messages
 identity.setup_transports()
+
+# *~*~* Connect to bootstrap node *~*~*
+# TODO: Save list of peers from last time
+#BOOTSTRAP_NODE = (("127.0.0.1 put something real here",,,
+BOOTSTRAP_NODE = (global_config['bootstrap_node_id'], global_config['bootstrap_node_address'])
+known_nodes = [BOOTSTRAP_NODE]]
+identity.peer_boostrap(known_nodes)
 
 for node in known_nodes:
     if node[0] == own_id:

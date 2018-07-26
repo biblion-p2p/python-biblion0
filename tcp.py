@@ -14,59 +14,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from crypto_util import *
 from log import log
-
-class Stream(object):
-    """
-    Represents an active stream. A stream is a set of packets sent over a
-    communications channel. A stream can have the following optional attributes:
-        - reliable
-        - encrypted
-    Later, streams will have other features such as masking your IP. These features
-    are provided by the channel the stream runs over.
-    """
-
-    # TODO Streams should have expiration time
-
-    def __init__(self, transport, connection, protocol_id, library_id, stream_id=None):
-        self.transport = transport
-        self.connection = connection
-        self.protocol_id = protocol_id
-        self.library_id = library_id
-        if not stream_id:
-            stream_id = connection['next_stream_id']
-            connection['next_stream_id'] += 2
-        self.stream_id = stream_id
-
-        self._opened = False
-        self.data = []
-        self.open = True
-        self.event = Event()
-
-    def _get_header(self):
-        header = {'protocolId': self.protocol_id,
-                  'streamId': self.stream_id}
-        if self.library_id:
-            header['libraryId'] = self.library_id
-        return header
-
-    def build_stream_header_from_message(self, message):
-        return self.build_stream_header(message['protocolId'],
-                                        message['streamId'],
-                                        message.get('libraryId'))
-
-    def send_message(self, data, close=False):
-        message = self._get_header()
-        if not self._opened:
-            self._opened = True
-            message['openStream'] = True
-        message['data'] = data
-        message['closeStream'] = close
-        self.transport.send_message(self.connection, message)
-
-    def read_message(self):
-        # XXX don't use this yet... need a better way to manage the Event
-        self.event.wait()
-        return self.data[0]
+from stream import Stream
 
 
 class TCPMuxed(object):
@@ -241,14 +189,14 @@ class TCPMuxed(object):
         enc_msg = self._encode_message(self._sym_encrypt(message, conn['session_key']))
         conn['socket'].sendall(enc_msg)
 
-    def create_stream(self, peer_id, protocol_id, library_id=None):
+    def create_stream(self, peer_id, service_id, library_id=None):
         if not peer_id in self._connections:
             # TODO establish a connection with the given peer.
             # This means we'll need the TCP addresses of the remote peer. Hm, maybe we should pass in a peer reference instead?
             log("XXX Shouldn't get here for now")
             pass
         conn = self._connections[peer_id]
-        new_stream = Stream(self, conn, protocol_id, library_id, stream_id=None)
+        new_stream = Stream(self, conn, service_id, library_id, stream_id=None)
         self._active_streams[new_stream.stream_id] = new_stream
         return new_stream
 

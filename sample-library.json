@@ -1,0 +1,15 @@
+{
+  "name": "myTestLibrary",
+  "owner": "aisdjiasjfiasfj",
+  "metadata": {
+    "type": "Gossip",
+    "delegate": "l:owner"
+  },
+  "authorization": {
+    "type": "userdb",
+    "db": {
+      "type": "Gossip",
+      "delegate": "l:owner"
+    }
+  }
+}
