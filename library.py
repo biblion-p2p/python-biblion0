@@ -1,6 +1,7 @@
 from kademlia import Kademlia
 from bittorrent import BitTorrent
 from download import SimpleDownload
+from libbiblion import Biblion
 
 # TODO:
 # Support user databases (gossip, or blockchain)
@@ -19,6 +20,7 @@ class Library(object):
         self.owner = owner
         self.routers = routers
         self.downloaders = downloaders
+        self.other = [Biblion]  # Biblion meta-protocol is required
 
         self.identity = identity
 
@@ -43,4 +45,4 @@ class Library(object):
         return Library(identity, name, owner, routers, downloaders)
 
     def get_services(self):
-        return self.routers + self.downloaders
+        return self.routers + self.downloaders + self.other

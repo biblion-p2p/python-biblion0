@@ -8,12 +8,6 @@ from copy import copy
 import gevent
 from gevent.event import Event
 
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
-from libbiblion import send_hello, handle_new_biblion_stream
 from log import log
 
 class WrappedStream(object):
@@ -52,7 +46,7 @@ class Peer(object):
         # Send a lone message. Useful for notifications
         pass
 
-    def send_request_sync(self, protocol, request):
+    def send_request_sync(self, service_id, request):
         # Sends a request and waits for a response from the remote peer.
         # Create a stream context with a protocol and library information
         # These will be used to initialize the stream
@@ -65,7 +59,7 @@ class Peer(object):
         # XXX this is hard coded and should be removed
         conn = self.identity.transports['tcp']
 
-        stream = conn.create_stream(self.peer_id, protocol, 0)  # , library)
+        stream = conn.create_stream(self.peer_id, service_id, 0)  # , library)
         stream.send_message(request)
         while stream.open:
             stream.event.wait()
@@ -84,8 +78,7 @@ class Peer(object):
         pass
 
     def handle_new_stream(self, stream):
-        # TODO XXX this needs to be pluggable. We should route based on application
-        gevent.spawn(handle_new_biblion_stream, stream)
+        gevent.spawn(self.identity.services.route_stream, stream)
 
     def reserve_channel(self, reliable=True):
         """

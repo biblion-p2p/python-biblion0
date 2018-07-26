@@ -255,8 +255,9 @@ class Kademlia(object):
         # this should be done asynchronously
         self.do_random_walk()
 
-    def handle_request(self, request):
-        mt = request['type']
+    def handle_message(self, stream):
+        message = stream.data.pop()
+        mt = message['type']
         if mt == 'kademlia_find_node':
             self.find_node(stream, message['payload'], query="node")
         elif mt == 'kademlia_find_value':
@@ -284,11 +285,7 @@ class Kademlia(object):
         results = self._nearest_nodes(req_node)
         # TODO add signature for UDP response
 
-        # TODO clean this up and make it way fducking easier later
-        response_obj = copy(stream['header'])
-        response_obj['data'] = {'payload': results}
-        response_obj['closeStream'] = True
-        send_message(stream['conn'], response_obj)
+        stream.send_message({'payload': results}, close=True)
         return results
 
     def find_value(self, request):

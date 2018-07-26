@@ -5,7 +5,7 @@ class Gossip(object):
 
     def start(self):
         # TODO try to connect with 8+ nodes
-        
+
         pass
 
     def handle_request(self, request):

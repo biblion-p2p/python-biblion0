@@ -27,6 +27,17 @@ class Stream(object):
         self.open = True
         self.event = Event()
 
+    def from_message(stream, transport, connection):
+        """
+        Creates a new stream object from a received message. This lets us pick
+        the stream from our side.
+        """
+        return Stream(transport,
+                      connection,
+                      stream['serviceId'],
+                      stream.get('libraryId'),
+                      stream['streamId'])
+
     def _get_header(self):
         header = {'serviceId': self.service_id,
                   'streamId': self.stream_id}

@@ -28,6 +28,7 @@ class TCPMuxed(object):
         self.on_connect = on_connect or (lambda x: x)
         self.on_stream = on_stream or (lambda x: x)
 
+        self._is_connecting = {}
         self._connections = {}
         self._active_streams = {}
 
@@ -54,6 +55,7 @@ class TCPMuxed(object):
 
     def _new_connection(self, connected_socket, peer_id, session_key, is_listener):
         new_conn = {
+            'peer_id': peer_id,
             'socket': connected_socket,
             'session_key': session_key,
             'listener': is_listener,
@@ -78,20 +80,24 @@ class TCPMuxed(object):
         log("Received %s" % message)
         inner_msg = message['data']
         stream_id = message['streamId']
-        if stream_id in self._active_streams:
-            stream = self._active_streams[stream_id]
+        if (peer_id, stream_id) in self._active_streams:
+            stream = self._active_streams[(peer_id, stream_id)]
             stream.data.append(inner_msg)
             stream.event.set()
         else:  # new stream
-            stream = Stream(self, conn, 1, 0, stream_id)  # TODO XXX need to read these from header
+            stream = Stream.from_message(message, self, conn)
             stream.data.append(inner_msg)
             stream._opened = True
-            self._active_streams[stream_id] = stream
+            self._active_streams[(peer_id, stream_id)] = stream
             self.on_stream(peer_id, stream)
 
-        if 'closeStream' in message and message['closeStream']:
-            self._active_streams[stream_id].open = False
-            del self._active_streams[stream_id]
+        self._clean_stream(message, peer_id)
+
+    def _clean_stream(self, message, peer_id):
+        if message.get('closeStream'):
+            stream_id = message['streamId']
+            self._active_streams[(peer_id, stream_id)].open = False
+            del self._active_streams[(peer_id, stream_id)]
 
     def _listen_for_messages(self, conn, peer_id):
         while True:  # TODO XXX need to catch exceptions
@@ -185,6 +191,7 @@ class TCPMuxed(object):
 
     def send_message(self, conn, message):
         log("Sending %s" % message)
+        self._clean_stream(message, conn['peer_id'])
         message = json.dumps(message).encode('utf-8')
         enc_msg = self._encode_message(self._sym_encrypt(message, conn['session_key']))
         conn['socket'].sendall(enc_msg)
@@ -194,10 +201,10 @@ class TCPMuxed(object):
             # TODO establish a connection with the given peer.
             # This means we'll need the TCP addresses of the remote peer. Hm, maybe we should pass in a peer reference instead?
             log("XXX Shouldn't get here for now")
-            pass
+            raise
         conn = self._connections[peer_id]
-        new_stream = Stream(self, conn, service_id, library_id, stream_id=None)
-        self._active_streams[new_stream.stream_id] = new_stream
+        new_stream = Stream(self, conn, service_id, library_id)
+        self._active_streams[(peer_id, new_stream.stream_id)] = new_stream
         return new_stream
 
     def mark_unneeded(self, peer_id):
@@ -228,10 +235,16 @@ class TCPMuxed(object):
         # We'll need to extract the TCP address data from the peer, and connect
         # to it, while verifying the peer id.
         if not self.is_ready(peer):
-            self._connect(peer)
+            if peer.peer_id in self._is_connecting:
+                log("Waiting on connect")
+                self._is_connecting[peer.peer_id].wait()
+            else:
+                self._connect(peer)
 
     def _connect(self, peer):
         peer_id = peer.peer_id
+        self._is_connecting[peer_id] = Event()
+
         # TODO XXX, need to iterate through TCP addresses and try to connect
         address, port = peer.addresses['ipv4']['tcp'][0]
 
@@ -242,6 +255,7 @@ class TCPMuxed(object):
         # TODO handle handshake failure
         session_key = self._handshake_dialer(sock, peer_id)
         self._new_connection(sock, peer_id, session_key, is_listener=False)
+        self._is_connecting[peer_id].set()
 
     def listen(self, addr, port):
         # XXX Listening on ipv6 should help remove NAT troubles, but it probably isn't widely supported

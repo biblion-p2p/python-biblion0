@@ -69,8 +69,23 @@ identity = Identity(keygen.get_keys(), addresses)
 own_id = identity.get_own_id()
 log("Starting. Our peer_id: %s" % own_id)
 
-# Start listening for messages
+# *~*~* Start listening for messages *~*~*
 identity.setup_transports()
+gevent.spawn(json_rpc.start_json_rpc, port+1)
+
+# *~*~* Initialize global library *~*~*
+global_library_spec = {
+  "name": "_global",
+  "routing": ["kademlia"],
+  # todo: blockchain, blockchain publishing, kademlia PoW
+  "download": ["bittorrent", "simple"]
+}
+
+global_lib = Library.create_library(global_library_spec, identity)
+
+identity.register_library(global_lib)
+# TODO register libraries from previous sessions
+identity.start_libraries()
 
 # *~*~* Connect to bootstrap node *~*~*
 # TODO: Save list of peers from last time
@@ -84,22 +99,7 @@ for node in known_nodes:
     if node[0] == own_id:
         continue
     peer = identity.add_or_get_peer(node[0], node[1])
-    libbiblion.hello(identity, node)
-
-gevent.spawn(json_rpc.start_json_rpc, port+1)
-
-global_library_spec = {
-  "name": "_global",
-  "routing": ["kademlia"],
-  # todo: blockchain, blockchain publishing, kademlia PoW
-  "download": ["bittorrent", "simple"]
-}
-
-global_lib = Library.create_library(global_library_spec, identity)
-
-identity.register_library(global_lib)
-# TODO register libraries from previous sessions
-identity.start_libraries()
+    identity.services.get_service('_global.biblion').hello(identity, node)
 
 gevent.wait()  # wait forever
 

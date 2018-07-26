@@ -6,6 +6,8 @@
 
 import gevent
 
+from log import log
+
 class ServiceManager(object):
     def __init__(self, identity):
         self.identity = identity
@@ -13,6 +15,12 @@ class ServiceManager(object):
 
     def register_service(self, service_id, service):
         self._services[service_id] = service
+
+    def route_stream(self, stream):
+        if stream.service_id in self._services:
+            self._services[stream.service_id].handle_message(stream)
+        else:
+            log("Discarding message for unknown service")
 
     def start_all(self):
         for service in self._services:

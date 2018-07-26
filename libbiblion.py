@@ -19,113 +19,126 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from log import log
 
-def handle_new_biblion_stream(stream):
-    """
-    Temporary generic request handler for biblion.
-    Protocol 1 (Though protocol number isn't even used yet, as of this comment).
-    Each message has a type and a payload.
-    The type should eventually be mostly elevated to the streaming layer, with
-    message signaling handled per application.
-    """
+class Biblion(object):
+    def __init__(self, library):
+        self.library = library
 
-    message = stream.data.pop()
-    mt = message['type']
+    def get_name(self):
+        return "biblion"
 
-    log("Received message %s, %s\n" % (stream, message))
+    def get_service_id(self):
+        # TODO XXX uhhh, this should come from somewhere else
+        return "%s.%s" % (self.library.name, self.get_name())
 
-    if mt == 'hello':
-        handle_hello(stream, message['payload'])
-    elif mt == 'query_pieces':
-        # Request a range of pieces
-        # should implement dynamic choke algorithm
-        # check out libtorrent. they have a good one for seeding that prefers peers who just started or who are about to finish
-        #https://github.com/arvidn/libtorrent/blob/master/src/choker.cpp
-        query_pieces(stream, message['payload'])
-    elif mt == 'lynx_send_transaction':
-        #
-        pass
-    elif mt == 'biblion_sync_blockchain':
-        # Return what the most recent block number is
-        pass
-    elif mt == 'biblion_query_price':
-        # should specify what we have in a request.
-        # response should in include what they have and if they accept our proposal.
-        pass
-    elif mt == 'biblion_announce_block':
-        pass
-    elif mt == 'biblion_send_transaction':
+    def start(self):
         pass
 
-def hello(identity, peer_info):
-    peer_id, addrs = peer_info
-    peer = identity.add_or_get_peer(peer_id)
-    peer.reserve_channel()  # establishes a TCP connection
-    send_hello(peer)
+    def handle_message(self, stream):
+        """
+        Temporary generic request handler for biblion.
+        Each message has a type and a payload.
+        The type should eventually be mostly elevated to the streaming layer, with
+        message signaling handled per application.
+        """
 
-def send_hello(peer):
-    # message should include our public addresses, our public library memberships, and our services for each library
+        message = stream.data.pop()
+        mt = message['type']
 
-    message = {'type': 'hello',
-               'payload': {
-                    # TODO XXX need to get our current peer id for the current connection
-                   'addrs': peer.identity.collect_addresses(),
-                   'libraries': peer.identity.collect_protocols()
-               }}
+        log("Received message %s, %s" % (stream, message))
 
-    response = peer.send_request_sync(1, message)  # TODO XXX protocol 1 is generic Biblion protocol
-    response = response[0]['payload']
-    log("got HELLO response")
+        if mt == 'hello':
+            self.handle_hello(stream, message['payload'])
+        elif mt == 'query_pieces':
+            # Request a range of pieces
+            # should implement dynamic choke algorithm
+            # check out libtorrent. they have a good one for seeding that prefers peers who just started or who are about to finish
+            #https://github.com/arvidn/libtorrent/blob/master/src/choker.cpp
+            self.query_pieces(stream, message['payload'])
+        elif mt == 'lynx_send_transaction':
+            #
+            pass
+        elif mt == 'biblion_sync_blockchain':
+            # Return what the most recent block number is
+            pass
+        elif mt == 'biblion_query_price':
+            # should specify what we have in a request.
+            # response should in include what they have and if they accept our proposal.
+            pass
+        elif mt == 'biblion_announce_block':
+            pass
+        elif mt == 'biblion_send_transaction':
+            pass
 
-    # TODO process library memberships in response or something
-    #peer.addresses = response['addrs']
+    def hello(self, identity, peer_info):
+        peer_id, addrs = peer_info
+        peer = self.library.identity.add_or_get_peer(peer_id)
+        peer.reserve_channel()  # establishes a TCP connection
+        self.send_hello(peer)
 
-    #_kademlia_add_node(peer, {'addrs': response['addrs'], 'peer_id': peer.peer_id})
+    def send_hello(self, peer):
+        # message should include our public addresses, our public library memberships, and our services for each library
 
-def handle_hello(stream, request):
-    # record libraries and services provided by node
-    log("Handling HELLO")
+        message = {'type': 'hello',
+                   'payload': {
+                        # TODO XXX need to get our current peer id for the current connection
+                       'addrs': peer.identity.collect_addresses(),
+                       'libraries': peer.identity.collect_protocols()
+                   }}
 
-    # TODO update the addresses of the peer
-    #stream.peer.addrs = request['addrs']
-    response = {'type': 'hello',
-                'payload': {'addrs': stream.transport.identity.collect_addresses(),
-                            'libraries': stream.transport.identity.collect_protocols()}}
+        response = peer.send_request_sync(self.get_service_id(), message)
+        response = response[0]['payload']
+        log("got HELLO response")
 
-    stream.send_message(response, close=True)
+        # TODO process library memberships in response or something
+        #peer.addresses = response['addrs']
 
-    #_kademlia_add_node(stream['peer'], {'addrs': request['addrs'], 'peer_id': stream['peer'].peer_id})
+        #_kademlia_add_node(peer, {'addrs': response['addrs'], 'peer_id': peer.peer_id})
 
-def query_pieces(stream, request):
-    result = {'have': [], 'price': 0}
-    for f in request['files']:
-        if False and f.get('isTorrent'):
-            # TODO XXX need to enable torrent downloads later
-            for piece in request['pieces']:
-                if have_data(piece):
-                    pass
-        else:
-            if have_data(f):
-                result['have'].append(f)
+    def handle_hello(self, stream, request):
+        # record libraries and services provided by node
+        log("Handling HELLO")
 
-    response = {'type': 'query_pieces',
-                'payload': result}
-    response_obj = copy(stream['header'])
-    response_obj['data'] = response
-    response_obj['closeStream'] = True
-    send_message(stream['conn'], response_obj)
+        # TODO update the addresses of the peer
+        #stream.peer.addrs = request['addrs']
+        response = {'type': 'hello',
+                    'payload': {'addrs': stream.transport.identity.collect_addresses(),
+                                'libraries': stream.transport.identity.collect_protocols()}}
 
-def download_piece(stream, request):
-    # TODO This should be wrapped in an authorization context if needed
-    piece_id = request['id']
-    if not have_data(piece_id):
-        # TODO throw useful exception
-        raise
+        stream.send_message(response, close=True)
 
-    file_data = read_file(piece_id)
+        #_kademlia_add_node(stream['peer'], {'addrs': request['addrs'], 'peer_id': stream['peer'].peer_id})
 
-    response = {'type': 'download_piece',
-                'payload': {'data': file_data}}
-    response_obj = copy(stream['header'])
-    response_obj['data'] = response
-    response_obj['closeStream'] = True
-    send_message(stream['conn'], response_obj)
+    def query_pieces(self, stream, request):
+        result = {'have': [], 'price': 0}
+        for f in request['files']:
+            if False and f.get('isTorrent'):
+                # TODO XXX need to enable torrent downloads later
+                for piece in request['pieces']:
+                    if have_data(piece):
+                        pass
+            else:
+                if have_data(f):
+                    result['have'].append(f)
+
+        response = {'type': 'query_pieces',
+                    'payload': result}
+        response_obj = copy(stream['header'])
+        response_obj['data'] = response
+        response_obj['closeStream'] = True
+        send_message(stream['conn'], response_obj)
+
+    def download_piece(self, stream, request):
+        # TODO This should be wrapped in an authorization context if needed
+        piece_id = request['id']
+        if not have_data(piece_id):
+            # TODO throw useful exception
+            raise
+
+        file_data = read_file(piece_id)
+
+        response = {'type': 'download_piece',
+                    'payload': {'data': file_data}}
+        response_obj = copy(stream['header'])
+        response_obj['data'] = response
+        response_obj['closeStream'] = True
+        send_message(stream['conn'], response_obj)
