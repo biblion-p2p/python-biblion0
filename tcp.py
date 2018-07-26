@@ -216,21 +216,24 @@ class TCPMuxed(object):
         """
         pass
 
-    def is_ready(self, peer_id):
+    def is_ready(self, peer):
         """
         Returns True if we have a connection to the peer
         """
-        pass
+        return peer.peer_id in self._connections
 
     def become_ready(self, peer):
         # TODO This should be used instead of connect(). It can be a generic
         # interface for all transports. Even those that aren't connection-oriented.
         # We'll need to extract the TCP address data from the peer, and connect
         # to it, while verifying the peer id.
-        self._connect(peer)
+        if not self.is_ready(peer):
+            self._connect(peer)
 
-    def connect(self, address, peer_id):
-        address, port = address
+    def _connect(self, peer):
+        peer_id = peer.peer_id
+        # TODO XXX, need to iterate through TCP addresses and try to connect
+        address, port = peer.addresses['ipv4']['tcp'][0]
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         # TODO handle connection failure

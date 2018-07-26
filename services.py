@@ -7,12 +7,12 @@
 import gevent
 
 class ServiceManager(object):
-    def __init__(self):
+    def __init__(self, identity):
+        self.identity = identity
         self._services = {}
 
     def register_service(self, service_id, service):
-        # TODO handle per-library services
-        self._services[protocol_id] = service
+        self._services[service_id] = service
 
     def start_all(self):
         for service in self._services:

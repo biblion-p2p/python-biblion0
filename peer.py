@@ -74,7 +74,14 @@ class Peer(object):
 
     def on_ready(self):
         # hmmm....
+        # unused for now. maybe this should be required?
         send_hello(self)
+
+    def handle_goaway(self):
+        # The peer can tell us to GOAWAY, which means they are going offline.
+        # Applications need to cleanup, channels need to be closed, and this peer
+        # should be marked as inactive
+        pass
 
     def handle_new_stream(self, stream):
         # TODO XXX this needs to be pluggable. We should route based on application
@@ -94,7 +101,9 @@ class Peer(object):
         #             transport.mark_needed()
 
         # XXX Defaulting to TCP for now. We should only connect if we don't already have a channel available
-        self.identity.transports['tcp'].connect(self.addresses['ipv4']['tcp'][0], self.peer_id)
+        tcp_transport = self.identity.transports['tcp']
+        if not tcp_transport.is_ready(self):
+            tcp_transport.become_ready(self)
 
     def release_channel(self, reliable=True):
         """

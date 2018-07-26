@@ -18,7 +18,10 @@ class UDP(object):
         self.send_datagram()
 
     def _pseudo_connect(self, peer):
-
+        """
+        Establish "session" with the peer over udp
+        """
+        pass
 
     def authenticate(self):
         """
@@ -28,7 +31,7 @@ class UDP(object):
         connect again. This does NOT provide encryption, but since we only use
         UDP for the DHT for now it should be fine.
         """
-        
+
         return
 
     def get_messages(self):
@@ -93,3 +96,4 @@ class UDP(object):
         return peer in self._pseudo_connections
 
     def become_ready(self, peer):
+        pass

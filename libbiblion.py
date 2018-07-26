@@ -33,10 +33,7 @@ def handle_new_biblion_stream(stream):
 
     log("Received message %s, %s\n" % (stream, message))
 
-    # over udp
-    if mt == 'ping':
-        pass
-    elif mt == 'hello':
+    if mt == 'hello':
         handle_hello(stream, message['payload'])
     elif mt == 'query_pieces':
         # Request a range of pieces
@@ -44,11 +41,6 @@ def handle_new_biblion_stream(stream):
         # check out libtorrent. they have a good one for seeding that prefers peers who just started or who are about to finish
         #https://github.com/arvidn/libtorrent/blob/master/src/choker.cpp
         query_pieces(stream, message['payload'])
-    elif mt == 'download_piece':
-        download_piece(stream, message['payload'])
-    elif mt == 'lynx_peer_exchange':
-        # Return known peers that have the same content. Useful for swarm management
-        pass
     elif mt == 'lynx_send_transaction':
         #
         pass
@@ -103,84 +95,6 @@ def handle_hello(stream, request):
 
     #_kademlia_add_node(stream['peer'], {'addrs': request['addrs'], 'peer_id': stream['peer'].peer_id})
 
-def do_fetch(fetch_data):
-    if fetch_data.get('is_library') and library['has_custom_routing']:
-        peers = library.router.get_peers
-        if peers.failed:
-            global_dht.get_peers
-    else:
-        peers = kademlia_do_lookup(fetch_data['id'], type="value")
-
-    connected_peers = random.sample(peers, min(10, len(peers))) # we connect to many peers to query their ownership, but will only download from a few
-
-    # TODO: At this point we should announce ourselves to the DHT. Hm, maybe this can be piggybacked on the FINDVALUE?
-
-    for peer in connected_peers:
-        # TODO XXX, we should wait for at least 5 peers to respond and choose the ones with the lowest ping. warning: those chosen nodes may have bad pricing!
-        peer_id = public_bits_to_peer_id(peer['pubbits'].encode('utf-8'))
-        if peer_id in connections:
-            conn = connections[peer_id]
-        else:
-            connect(peer_id, peer['addrs'])
-            # TODO XXX verify connection succeeded
-            conn = connections[peer_id]
-        piece_query = {'type': 'query_pieces',
-                       'payload': {'files': [fetch_data['id']]}}
-        res = send_request_sync(conn, piece_query)[0]['payload']
-        if res['have']:
-            log("Peer has data: %s" % res)
-            price = res['price']
-            if price != 0:
-                log("Can't handle micropayment based downloads yet")
-                return
-            # TODO need to confirm price is correct. to start, we can simply use bits as price, and disconnect from nodes that misbehave
-            if False and res['isTorrent']:
-                # TODO XXX This whole thing needs work
-                # The payment handling should probably wrap the protocol somehow
-                p.mark_active(fetch_data.id)
-                while p.is_active: # ie, unchoked
-                    for pieces in fetch_state.rarest_pieces(p, p.trust):  # get some rare pieces from the node based on their trust. if they behave well, we request more.
-                        payment_channel = None
-                        if p.is_library_node(fetch_data.library) and library.needs_payment():
-                            if p.has_payment_channel(piece):
-                                payment_channel = p.payment_channel
-                            else:
-                                payment_channel = library.create_payment_channel(p, piece, 5)
-
-                        for piece in pieces:  # TODO parallelize based on trust
-                            if payment_channel:
-                                payment_channel.add_signature(piece)  # bump up the authorized transaction amount. MUST BE THREAD SAFE!
-                            p.get_block(piece, payment_channel)
-                            p.trust += 1  # increase outstanding requests
-                            if p.newly_choked:
-                                p.abort_download  # wait for existing stuff to stop, then choose new peer
-
-                        p.request_piece(piece, payment_channel)
-            else:
-                preq = {'type': 'download_piece',
-                        'payload': {'id': fetch_data['id']}}
-                pres = send_request_sync(conn, preq)[0]['payload']
-
-                digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
-                digest.update(pres['data'].encode('utf-8'))
-                hash = digest.finalize().hex()
-
-                if hash != fetch_data['id']:
-                    log("Transferred data was incorrect!")
-                    raise
-
-                tmpfile = open('/tmp/bibtemp', 'w')
-                tmpfile.write(pres['data'])
-                tmpfile.close()
-
-                process_file('/tmp/bibtemp')
-                # TODO XXX need to make sure we also announce to DHT. See above as well, for torrent downloads
-        else:
-            # mark the node as unneeded. it can be pruned or kept active for gossip, etc
-            # should send goaway if truly unneeded
-            p.mark_as_unneeded()
-
-
 def query_pieces(stream, request):
     result = {'have': [], 'price': 0}
     for f in request['files']:
@@ -215,18 +129,3 @@ def download_piece(stream, request):
     response_obj['data'] = response
     response_obj['closeStream'] = True
     send_message(stream['conn'], response_obj)
-
-def _util_nodeid_to_bits(peer_id):
-    peer_id_bytes = base64.b64decode(peer_id)
-    return _util_convert_bytestring_to_bits(peer_id_bytes)
-
-def _util_convert_bytestring_to_bits(bytes):
-    # this function shouldn't be needed in the rust version. we can just bit-twiddle in the trie
-    result = ""
-    for byte in bytes:
-        current_byte = ""
-        for n in range(8):
-            bit = (byte >> n) & 1
-            current_byte = "01"[bit] + current_byte
-        result += current_byte
-    return result

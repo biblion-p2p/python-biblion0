@@ -1,5 +1,10 @@
+import json
+import time
+import base64
 import http.server
 import socketserver
+
+from log import log
 
 httpd_instance = None
 
@@ -54,7 +59,7 @@ class BiblionRPCRequestHandler(http.server.BaseHTTPRequestHandler):
                     signed_message = {'message': message, 'sig': base64.b64encode(signature).decode('utf-8')}
                     log("Processed file %s\n" % signed_message)
                     file_hash_b64 = base64.b64encode(bytes.fromhex(file_hash)).decode('utf-8')
-                    kademlia_do_store(file_hash_b64, signed_message)
+                    kademlia.do_store(file_hash_b64, signed_message)
                     response_data += "Added and announced as %s\n" % file_hash
                 elif parsed_data['command'] == 'add_file_to_library':
                     # create metadata record

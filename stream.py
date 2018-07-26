@@ -1,3 +1,5 @@
+from gevent.event import Event
+
 class Stream(object):
     """
     Represents an active stream. A stream is a set of packets sent over a

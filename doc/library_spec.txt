@@ -1,0 +1,30 @@
+A library is defined by a JSON document that codifies the structure of the
+community.
+
+Every library definition should include these values:
+
+"name"
+A user-readable name for the library. Used for making things easier on the client
+
+"owner"
+An ID representing the owner of the library
+
+Optional values
+
+"userdb"
+Defines a user database for the library.
+
+
+
+Per-application configuration
+
+Kademlia
+"kademlia.authorization"
+Can be "userdb", "owner_check"
+
+BitTorrent
+"bittorrent.authorization"
+Can
+
+SimpleDownload
+Hm, this should probably be merged with BitTorrent actually :^)

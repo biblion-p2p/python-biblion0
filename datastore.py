@@ -1,24 +1,28 @@
+import shutil
+
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import hashes
 
 class DataStore(object):
     def __init__(self, path):
         self.data_store = {}
         self.path = path
 
+        # TODO verify that all files that we think we own are still there
+        # TODO queue DHT announcements for anything that needs it
+
     def have_data(self, hash):
-        global _data_store
-        return hash in _data_store
+        return hash in self.data_store
 
     def add_piece_record(self, hash, length):
-        global _data_store
         # TODO store length and path metadata
-        _data_store[hash] = True
+        self.data_store[hash] = True
 
     def read_file(self, hash):
-        global _data_store
-        if hash not in _data_store:
+        if self.have_data(hash):
             # TODO return a useful exception
             raise
-        return open("data/pieces/%s"%hash).read()
+        return open("%s%s"%(path,hash)).read()
 
     def process_file(self, file_path):
         f = open(file_path, 'rb')
@@ -27,6 +31,6 @@ class DataStore(object):
         digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
         digest.update(data)
         hash = digest.finalize().hex()
-        shutil.copyfile(file_path, "data/pieces/" + hash)
-        add_piece_record(hash, length)
+        shutil.copyfile(file_path, path + hash)
+        self.add_piece_record(hash, length)
         return hash

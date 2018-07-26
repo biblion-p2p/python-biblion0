@@ -1,0 +1,78 @@
+# Design overview for the whole thing. This is the closest thing to a whitepaper i'll write up.
+
+
+Abstract
+
+Biblion is a platform for creating self-defining decentralized data communities.
+Nodes within Biblion participate in a global content-addressable file sharing
+network. Users can share files, or definition files that define a library: a
+community for sharing data. Libraries can define themselves using services
+provided by the Biblion application, or define completely custom code. At the
+core of Biblion is a modern networking stack that supports peer authentication
+and stream multiplexing.
+
+
+1. Abstract
+2. Overview
+3. Existing Work
+4. Core services
+5. Library architecture
+6. Network architecture
+7. Future Work
+
+=Overview=
+
+Biblion is a platform for peer-to-peer networks built from the ground up.
+
+- P2P, contentaddressable store
+- BitTorrent style downloads
+- DHT and blockchain
+- Library definitions
+  - Ownership and usership
+  - Authorization strategies
+  - Pluggable routing (DHT, DNS, etc)
+- Nanobartering/agorics
+- Networking
+  - Multiplexing
+    - One authentication scheme. Multiple transports.
+
+=Existing Work=
+
+IPFS/Libp2p - The Interplanetary File System[]
+MojoNation/Mnet -
+
+Bitcoin
+Ethereum
+Freenet
+Tor
+
+=Core Services=
+
+BitTorrent
+Kademlia
+Blockchain
+Gossip
+SimpleBank
+UserDB
+DataStore
+
+=Library Achitecture=
+- Ownership
+- Managing users
+- Gossip protocols
+- Privacy
+
+=Network Architecture=
+- Multiplexing of requests, over multiplexed transports
+- define "channel"
+- QUIC and TLS1.3
+- UDP auth cookies
+- Peer storage
+
+=Future Work=
+-Network hardening (QUIC)
+-Additional configuration rules for libraries
+-Biblion 2.0 (library configurations should be able to reference arbitrary code)
+-Community types and incentive strategies
+  - Completely private/disconnected libraries
+  -

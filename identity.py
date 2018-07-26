@@ -11,6 +11,8 @@ from log import log
 from peer import Peer
 from tcp import TCPMuxed
 from udp import UDP
+from services import ServiceManager
+from datastore import DataStore
 
 class Identity(object):
     """
@@ -18,13 +20,14 @@ class Identity(object):
     Each identity listens for connections from other peers.
     """
 
-    __slots__ = ['public_key', 'private_key', 'transports', 'addresses', 'peers']
-
     def __init__(self, keypair, addresses):
         self.public_key, self.private_key = keypair
         self.addresses = addresses
+        self.libraries = {}
         self.transports = {}
         self.peers = {}
+        self.data_store = DataStore("data/pieces")
+        self.services = ServiceManager(self)
 
     def setup_transports(self):
         ipv4_addrs = self.addresses['ipv4']
@@ -52,10 +55,39 @@ class Identity(object):
         """
         Adds a record of a peer
         """
+        if peer_id == self.get_own_id():
+            # Can't be a peer to ourselves. Services would get confused
+            # XXX raise a useful exception
+            raise
+
         if peer_id not in self.peers:
             peer = Peer(peer_id, addrs, self)
             self.peers[peer_id] = peer
         return self.peers[peer_id]
+
+    def request_peers(self, count):
+        """
+        Try to return the given number of peers, or all known peers if we
+        don't have enough
+        """
+        if len(self.peers) <= count:
+            return self.peers.values()
+        else:
+            return random.sample(self.peers.values(), count)
+
+    def register_library(self, library):
+        """
+        Associates us with a library. Does not check to see if we're a legitimate member!
+        That will be done by the services.
+        """
+        self.libraries[library.name] = library
+        for serv in library.get_services():
+            serv_inst = serv(library)
+            service_id = "%s.%s" % (library.name, serv_inst.get_name())
+            self.services.register_service(service_id, serv_inst)
+
+    def start_libraries(self):
+        self.services.start_all()
 
     def handle_connection(self, peer_id, transport):
         # Create new Peer record
