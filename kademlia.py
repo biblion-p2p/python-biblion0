@@ -85,20 +85,20 @@ class KTrie(object):
 
     def add_node(self, node_object):
         trie_root = self.state
-        peer_id = node_object['peer_id_bin']
+        peer_id_bin = node_object['peer_id_bin']
 
         peer_id_index = 0
         current_node = trie_root
         while True:
             if current_node['children']:
                 # The node is a branch node, iterate into branch
-                while peer_id_index < len(current_node['prefix']) and current_node['prefix'][peer_id_index] == peer_id[peer_id_index]:
+                while peer_id_index < len(current_node['prefix']) and current_node['prefix'][peer_id_index] == peer_id_bin[peer_id_index]:
                     peer_id_index += 1
 
                 if peer_id_index == len(current_node['prefix']):
                     # the prefix matches. iterate down.
                     current_node['count'] += 1
-                    current_node = current_node['children'][peer_id[peer_id_index]]
+                    current_node = current_node['children'][peer_id_bin[peer_id_index]]
                 else:
                     # new to add new branch here
                     branched_node = {'children': current_node['children'],
@@ -106,13 +106,13 @@ class KTrie(object):
                                      'leaf': None,
                                      'count': current_node['count']}
                     current_node['count'] += 1
-                    current_node['children'][peer_id[peer_id_index]] = {'leaf': node_object,
-                                                                        'children': {},
-                                                                        'count': 1}
+                    current_node['children'][peer_id_bin[peer_id_index]] = {'leaf': node_object,
+                                                                            'children': {},
+                                                                            'count': 1}
                     current_node['children'][current_node['prefix'][peer_id_index]] = branched_node
                     current_node['prefix'] = current_node['prefix'][:peer_id_index]  # truncate the prefix to represent the new branch
                     return
-            elif current_node['leaf'] and current_node['leaf']['peer_id'] == peer_id:
+            elif current_node['leaf'] and current_node['leaf']['peer_id_bin'] == peer_id_bin:
                 # This ID is already in the trie. Give up.
                 # TODO Maybe this should be where we update the record and kbuckets? Hmm, probably that should be in other code
                 return
@@ -120,23 +120,23 @@ class KTrie(object):
                 # We need to branch the trie at this point. We find the first
                 # uncommon bitstarting at the current index and then branch at that
                 # bit.
-                while current_node['leaf']['peer_id'][peer_id_index] == peer_id[peer_id_index]:
+                while current_node['leaf']['peer_id_bin'][peer_id_index] == peer_id_bin[peer_id_index]:
                     # This is safe because we check if the node ids are equal above.
                     # There must be a difference in the nodes
                     peer_id_index += 1
 
                 # Move current leaf into branch
-                current_node['prefix'] = peer_id[:peer_id_index]
-                current_node['children'][current_node['leaf']['peer_id'][peer_id_index]] = {'leaf': current_node['leaf'],
-                                                                                            'children': {},
-                                                                                            'count': 1}
+                current_node['prefix'] = peer_id_bin[:peer_id_index]
+                current_node['children'][current_node['leaf']['peer_id_bin'][peer_id_index]] = {'leaf': current_node['leaf'],
+                                                                                                'children': {},
+                                                                                                'count': 1}
                 current_node['count'] += 1
                 current_node['leaf'] = None
 
                 # Add new node as child
-                current_node['children'][peer_id[peer_id_index]] =  {'leaf': node_object,
-                                                                     'children': {},
-                                                                     'count': 1}
+                current_node['children'][peer_id_bin[peer_id_index]] =  {'leaf': node_object,
+                                                                         'children': {},
+                                                                         'count': 1}
                 return
             else:  # fresh trie
                 current_node['leaf'] = node_object
@@ -151,7 +151,7 @@ class KTrie(object):
         else:
             return self.collect_leaves(node['children']['0']) + self.collect_leaves(node['children']['1'])
 
-    def get_closest(self, peer_id):
+    def get_closest(self, peer_id_bin):
         trie_root = self.state
         results = []
 
@@ -182,7 +182,7 @@ class KTrie(object):
 
             if current_node['children']:
                 # The node is a branch node, choose the best branch to iterate to
-                branch_bit = peer_id[len(current_node['prefix'])]
+                branch_bit = peer_id_bin[len(current_node['prefix'])]
                 n_branch_bit = '0' if branch_bit == '1' else '1'
                 if current_node['prefix'] + branch_bit not in used_prefixes:
                     next_node = current_node['children'][branch_bit]
@@ -233,6 +233,10 @@ class Kademlia(object):
         # initialize DHT
         # call find_node on self, adding neighbors until buckets are full or we run out of nodes to query
 
+        # TODO XXX hmm, when the bootstrap node starts up it will have no one.
+        # When a peer connects to it, we need to be sure to notify Kademlia. Or
+        # maybe there's a cleaner way?
+
         log("Starting Kademlia...")
 
         # Add existing nodes
@@ -275,9 +279,11 @@ class Kademlia(object):
             log("FIND query should specify NODE or VALUE")
             return
 
-        # TODO XXX enable when using UDP DHT
-        # if request.signature.address == message.address:
-        #     _kademlia_queue_add(request)
+        peer = stream.peer
+        if request['sender']:
+            peer.add_addresses(request['sender'])
+            self._add_node(peer)
+
         req_node = request['nodeId']
         if query == 'value' and req_node in self.store:
             result = self.store.get(req_node)
@@ -305,14 +311,28 @@ class Kademlia(object):
         # TODO Should add a command on peer to check if a channel is in `ready` state
         pass
 
-    def send_find_node(self, peer_id):
+    def _send_request(self, peer):
+        # TODO XXX in the future, we will want send messages to service based
+        # on protocol numbers that need to be negotiated. But for cases where we
+        # don't want to wait a round trip to get protocol number, we can specify
+        # the protocol using ProtoRoute. This let's us do 0RTT kademlia requests
+        # to known nodes.
+        if peer.has_protocols():
+            peer.send_request_sync(blah)
+        else:
+            wrapper = ProtoRoute(blah)
+            peer.send_message(wrapper)
+
+    def send_find_node(self, peer_id, recipient_peer_id):
         msg = {'type': 'kademlia_find_node',
-               'payload': {'nodeId': peer_id}}
-        log("Sending FIND_NODE to %s" % peer_id)
-        peer = self.library.identity.add_or_get_peer(peer_id)
+               'payload': {'nodeId': peer_id,
+                           'sender': self.library.identity.collect_addresses()}}
+        log("Sending FIND_NODE to %s" % recipient_peer_id)
+        peer = self.library.identity.add_or_get_peer(recipient_peer_id)
         return peer.send_request_sync(self.get_service_id(), msg)[0]['payload']
         if False:
             # TODO this is old code. Need to request unreliable channel instead
+            # Then the above code will continue to work, but over UDP (or QUIC-unreliable)
             address, port = get_ipv4_address(node)
             send_datagram(msg, address)
             connection.send_request(msg)
@@ -375,7 +395,7 @@ class Kademlia(object):
                 break
             accessed_nodes.append(current_node)  # synchronized
             # XXX ah, we need to mark if the node actually responded. Not just if it was queried. That makes things more ugly. sigh...
-            new_nodes = self.send_find_node(current_node['peer_id'])
+            new_nodes = self.send_find_node(peer_id, current_node['peer_id'])
             # TODO XXX need to enable this for UDP kademlia
             #if confirm_sig(node):
             #   _kademlia_queue_add(node)
@@ -552,6 +572,10 @@ class Kademlia(object):
             return
 
         addresses = peer.addresses
+
+        if not addresses:
+            log("Peer has no addresses. Not adding to DHT")
+            return
 
         if peer_id in self.active_nodes:
             # TODO should be moved to end of list?

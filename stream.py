@@ -12,11 +12,12 @@ class Stream(object):
 
     # TODO Streams should have expiration time
 
-    def __init__(self, transport, connection, service_id, library_id, stream_id=None):
+    def __init__(self, transport, connection, service_id, library_id, peer, stream_id=None):
         self.transport = transport
         self.connection = connection
         self.service_id = service_id
         self.library_id = library_id
+        self.peer = peer
         if not stream_id:
             stream_id = connection['next_stream_id']
             connection['next_stream_id'] += 2
@@ -27,7 +28,7 @@ class Stream(object):
         self.open = True
         self.event = Event()
 
-    def from_message(stream, transport, connection):
+    def from_message(stream, transport, connection, peer):
         """
         Creates a new stream object from a received message. This lets us pick
         the stream from our side.
@@ -36,6 +37,7 @@ class Stream(object):
                       connection,
                       stream['serviceId'],
                       stream.get('libraryId'),
+                      peer,
                       stream['streamId'])
 
     def _get_header(self):

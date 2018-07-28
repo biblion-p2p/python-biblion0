@@ -32,6 +32,10 @@ class Peer(object):
         self.identity = identity
         self.active_streams = {}
 
+    def add_addresses(self, addrs):
+        # TODO XXX this should do a union
+        self.addresses = addrs
+
     def add_transport(*whatever):
         # XXX doesn't do anything for now....
         # It would be convenient if peers could get easy access to their
@@ -67,9 +71,9 @@ class Peer(object):
         return stream.data
 
     def on_ready(self):
-        # hmmm....
-        # unused for now. maybe this should be required?
-        send_hello(self)
+        # need to figure out when to call "hello"
+        if not self.addresses:
+            send_hello(self)
 
     def handle_goaway(self):
         # The peer can tell us to GOAWAY, which means they are going offline.

@@ -80,7 +80,6 @@ class Biblion(object):
 
         message = {'type': 'hello',
                    'payload': {
-                        # TODO XXX need to get our current peer id for the current connection
                        'addrs': peer.identity.collect_addresses(),
                        'libraries': peer.identity.collect_protocols()
                    }}
@@ -91,8 +90,6 @@ class Biblion(object):
 
         # TODO process library memberships in response or something
         #peer.addresses = response['addrs']
-
-        #_kademlia_add_node(peer, {'addrs': response['addrs'], 'peer_id': peer.peer_id})
 
     def handle_hello(self, stream, request):
         # record libraries and services provided by node
@@ -105,8 +102,6 @@ class Biblion(object):
                                 'libraries': stream.transport.identity.collect_protocols()}}
 
         stream.send_message(response, close=True)
-
-        #_kademlia_add_node(stream['peer'], {'addrs': request['addrs'], 'peer_id': stream['peer'].peer_id})
 
     def query_pieces(self, stream, request):
         result = {'have': [], 'price': 0}
@@ -122,22 +117,6 @@ class Biblion(object):
 
         response = {'type': 'query_pieces',
                     'payload': result}
-        response_obj = copy(stream['header'])
-        response_obj['data'] = response
-        response_obj['closeStream'] = True
-        send_message(stream['conn'], response_obj)
-
-    def download_piece(self, stream, request):
-        # TODO This should be wrapped in an authorization context if needed
-        piece_id = request['id']
-        if not have_data(piece_id):
-            # TODO throw useful exception
-            raise
-
-        file_data = read_file(piece_id)
-
-        response = {'type': 'download_piece',
-                    'payload': {'data': file_data}}
         response_obj = copy(stream['header'])
         response_obj['data'] = response
         response_obj['closeStream'] = True

@@ -85,7 +85,8 @@ class TCPMuxed(object):
             stream.data.append(inner_msg)
             stream.event.set()
         else:  # new stream
-            stream = Stream.from_message(message, self, conn)
+            peer = self.identity.add_or_get_peer(peer_id)
+            stream = Stream.from_message(message, self, conn, peer)
             stream.data.append(inner_msg)
             stream._opened = True
             self._active_streams[(peer_id, stream_id)] = stream
@@ -202,8 +203,9 @@ class TCPMuxed(object):
             # This means we'll need the TCP addresses of the remote peer. Hm, maybe we should pass in a peer reference instead?
             log("XXX Shouldn't get here for now")
             raise
+        peer = self.identity.add_or_get_peer(peer_id)
         conn = self._connections[peer_id]
-        new_stream = Stream(self, conn, service_id, library_id)
+        new_stream = Stream(self, conn, service_id, library_id, peer)
         self._active_streams[(peer_id, new_stream.stream_id)] = new_stream
         return new_stream
 

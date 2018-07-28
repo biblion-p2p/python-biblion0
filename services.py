@@ -23,8 +23,8 @@ class ServiceManager(object):
             log("Discarding message for unknown service")
 
     def start_all(self):
-        for service in self._services:
-            gevent.spawn(self._services[service].start)
+        for service in self._services.values():
+            gevent.spawn(service.start)
 
     def get_service(self, service_id):
         if service_id not in self._services:
