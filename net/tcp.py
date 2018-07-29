@@ -28,6 +28,7 @@ class TCPMuxed(object):
         self.on_connect = on_connect or (lambda x: x)
         self.on_stream = on_stream or (lambda x: x)
 
+        self._listen_socket = None
         self._is_connecting = {}
         self._connections = {}
         self._active_streams = {}
@@ -64,7 +65,7 @@ class TCPMuxed(object):
         # TODO we can do a lot more here... For example, we can have a
         # TCP-only metaprotocol that keeps the connection alive. This way
         # we can maintain connections even when there is not much activity.
-        # Probably importatnt for gossip protocols.
+        # Probably important for gossip protocols.
         self._connections[peer_id] = new_conn
         gevent.spawn(self._listen_for_messages, new_conn, peer_id)
 
@@ -101,12 +102,17 @@ class TCPMuxed(object):
             del self._active_streams[(peer_id, stream_id)]
 
     def _listen_for_messages(self, conn, peer_id):
-        while True:  # TODO XXX need to catch exceptions
-            message = self._recv_message(conn['socket'])
-            message = self._sym_decrypt(message, conn['session_key'])
+        while True:
+            try:
+                message = self._recv_message(conn['socket'])
+                message = self._sym_decrypt(message, conn['session_key'])
+            except Exception as e:
+                log("Connection failed. Closing. %s" % e)
+                conn['socket'].close()
+                break
+
 
             self._stream_router(peer_id, message, conn)
-        # TODO handle disconnect
 
     def _handshake_listener(self, client_socket):
         """
@@ -262,13 +268,26 @@ class TCPMuxed(object):
     def listen(self, addr, port):
         # XXX Listening on ipv6 should help remove NAT troubles, but it probably isn't widely supported
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            self._listen_socket = sock
             sock.bind((addr, port))
             sock.listen(50)
 
             log("Now listening on TCP socket %s" % port)
 
             while True:
-                connected_socket, _ = sock.accept()
+                try:
+                    connected_socket, _ = sock.accept()
+                except Exception as e:
+                    log("Listening socket failed. Shutting down TCP. %s" % e)
+                    sock.close()
+                    break
                 log("Accepting new connection")
                 gevent.spawn(self._handle_connection, connected_socket)
                 gevent.sleep(0)
+
+    def shutdown(self):
+        if self._listen_socket:
+            self._listen_socket.close()
+            self._listen_socket = None
+        for conn in self._connections.values():
+            conn['socket'].close()

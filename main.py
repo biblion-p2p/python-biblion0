@@ -29,6 +29,7 @@ def signal_handler(signal, frame):
         gevent.spawn(json_rpc.shutdown_json_rpc)
         # XXX need to call shutdown on each transport
         #gevent.spawn(libbiblion.shutdown_sockets)
+        gevent.spawn(identity.shutdown)
         gevent.spawn(async_suicide)
 signal.signal(signal.SIGINT, signal_handler)
 

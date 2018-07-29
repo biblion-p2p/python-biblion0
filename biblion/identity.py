@@ -109,3 +109,8 @@ class Identity(object):
     def collect_protocols(self):
         # XXX TODO actually check what libraries we are a member of.
         return {'_global': ['dht']}
+
+    def shutdown(self):
+        for name, transport in self.transports.items():
+            log("Shutting down %s" % name)
+            transport.shutdown()
