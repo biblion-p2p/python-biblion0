@@ -65,3 +65,8 @@ class Stream(object):
         # XXX don't use this yet... need a better way to manage the Event
         self.event.wait()
         return self.data[0]
+
+    def is_alive(self):
+        # TODO return false if not. Used to check if underlying connection failed
+        # Maybe this should be part of read()?
+        pass

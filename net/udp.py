@@ -97,3 +97,6 @@ class UDP(object):
 
     def become_ready(self, peer):
         pass
+
+    def shutdown(self):
+        self.socket.close()

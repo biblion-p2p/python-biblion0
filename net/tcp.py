@@ -128,8 +128,7 @@ class TCPMuxed(object):
         node_pubkey = serialization.load_pem_public_key(message['pub'].encode('utf-8'),
                                                         default_backend())
         nonce = random.randint(0, (2**32)-1)
-        signature = self.identity.private_key.sign(struct.pack('I', nonce_challenge),
-                                                   ec.ECDSA(hashes.SHA256()))
+        signature = self.identity.sign(struct.pack('I', nonce_challenge))
         resp = json.dumps({'pub': self.identity.get_public_bits().decode('utf-8'),
                            'nonce': nonce,
                            'sig': base64.b64encode(signature).decode('utf-8')})
@@ -147,7 +146,7 @@ class TCPMuxed(object):
             raise
 
         # End: ECDH
-        shared_key = self.identity.private_key.exchange(ec.ECDH(), node_pubkey)
+        shared_key = self.identity.ecdh(node_pubkey)
 
         return pub_to_nodeid(node_pubkey), shared_key
 
@@ -181,8 +180,7 @@ class TCPMuxed(object):
             log("Exception! Signature of other node could not be verified")
 
         # Request 2: new challenge answer
-        signature = self.identity.private_key.sign(struct.pack('I', nonce_challenge),
-                                     ec.ECDSA(hashes.SHA256()))
+        signature = self.identity.sign(struct.pack('I', nonce_challenge))
         req2 = json.dumps({'sig': base64.b64encode(signature).decode('utf-8')})
         sock.sendall(self._encode_message(req2))
 
@@ -191,7 +189,7 @@ class TCPMuxed(object):
         # same shared secret every time!
         # Instead we should be establishing TLS connections between nodes, and
         # using forward secrecy
-        shared_key = self.identity.private_key.exchange(ec.ECDH(), node_pubkey)
+        shared_key = self.identity.ecdh(node_pubkey)
 
         log("Successfully connected to %s" % pub_to_nodeid(node_pubkey))
         return shared_key

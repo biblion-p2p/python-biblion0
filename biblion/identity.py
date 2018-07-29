@@ -14,6 +14,10 @@ from biblion.datastore import DataStore
 from net.tcp import TCPMuxed
 from net.udp import UDP
 
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+
 class Identity(object):
     """
     An identity is a represented by an asymmetric keypair.
@@ -109,6 +113,12 @@ class Identity(object):
     def collect_protocols(self):
         # XXX TODO actually check what libraries we are a member of.
         return {'_global': ['dht']}
+
+    def sign(self, message):
+        return self.private_key.sign(message, ec.ECDSA(hashes.SHA256()))
+
+    def ecdh(self, peer_pubkey):
+        return self.private_key.exchange(ec.ECDH(), peer_pubkey)
 
     def shutdown(self):
         for name, transport in self.transports.items():

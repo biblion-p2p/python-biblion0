@@ -108,7 +108,4 @@ class SimpleDownload(object):
 
         response = {'type': 'download_piece',
                     'payload': {'data': file_data}}
-        response_obj = copy(stream['header'])
-        response_obj['data'] = response
-        response_obj['closeStream'] = True
-        send_message(stream['conn'], response_obj)
+        stream.send_message(response, close=True)
