@@ -71,20 +71,36 @@ class SimpleDownload(object):
     def get_name(self):
         return "simpledownload"
 
-    def handle_request(self, stream, request):
+    def handle_rpc(self, request):
+        if request['command'] == 'download':
+            self.do_download(request)
+
+    def do_download(self, request):
+        file_id = request['file']
+        file_record = DataStore.get_file(file_id)
+        if not file_record:
+            # new download
+            pass
+        if not file_record['complete']:
+            # resume download
+            pass
+        else:  # just serve the file locally
+            pass
+
+    def handle_message(self, stream):
         message = stream.data.pop()
         mt = message['type']
 
-        if mt != 'download_piece':
+        if mt != 'download':
             # TODO XXX useful exception
             raise
 
-        self.download_piece(message['payload'])
+        self.download_piece(message['payload'], stream)
 
-    def download_piece(self, stream, request):
+    def download_piece(self, request, stream):
         # TODO This should be wrapped in an authorization context if needed
         piece_id = request['id']
-        if not have_data(piece_id):
+        if not DataStore.have_data(piece_id):
             # TODO throw useful exception
             raise
 

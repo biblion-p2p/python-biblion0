@@ -1,7 +1,7 @@
-from kademlia import Kademlia
-from bittorrent import BitTorrent
-from download import SimpleDownload
-from libbiblion import Biblion
+from services.kademlia import Kademlia
+from services.bittorrent import BitTorrent
+from services.download import SimpleDownload
+from services.libbiblion import Biblion
 
 # TODO:
 # Support user databases (gossip, or blockchain)

@@ -12,9 +12,9 @@ from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from biblion.stream import Stream
 from crypto_util import *
 from log import log
-from stream import Stream
 
 
 class TCPMuxed(object):

@@ -8,11 +8,11 @@ import gevent
 
 from crypto_util import *
 from log import log
-from peer import Peer
-from tcp import TCPMuxed
-from udp import UDP
-from services import ServiceManager
-from datastore import DataStore
+from biblion.peer import Peer
+from biblion.services import ServiceManager
+from biblion.datastore import DataStore
+from net.tcp import TCPMuxed
+from net.udp import UDP
 
 class Identity(object):
     """

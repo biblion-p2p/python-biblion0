@@ -11,11 +11,11 @@ import time
 import gevent
 
 import keygen
-import libbiblion
+import services.libbiblion
 import json_rpc
-from library import Library
+from biblion.identity import Identity
+from biblion.library import Library
 from log import log
-from identity import Identity
 
 # *~*~* Shutdown-signal handlers *~*~*
 def async_suicide():
