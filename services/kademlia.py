@@ -2,6 +2,10 @@ import base64
 import json
 import time
 
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization, hashes
+from cryptography.hazmat.primitives.asymmetric import ec
+
 from services._ktrie import KTrie
 
 from log import log
@@ -37,7 +41,7 @@ class Kademlia(object):
         self.active_nodes = {}
         self.k_buckets = {}
         self.siblings = {'nodes': [], 'max': 0}
-        self.store = {}
+        self.record_store = {}
         for i in range(256): self.k_buckets[i] = []
 
         self.library = library
@@ -87,7 +91,29 @@ class Kademlia(object):
         elif mt == 'kademlia_find_value':
             self.find_node(stream, message['payload'], query="value")
         elif mt == 'kademlia_publish':
-            self.kademlia_store(stream, message['payload'])
+            self.store(stream, message['payload'])
+
+    def handle_rpc(self, request):
+        if request['command'] == 'log_dht':
+            response = "Current Kademlia DHT state:\n"
+            response += "Our node id: %s\n" % self.library.identity.get_own_id()
+            response += json.dumps(str(self.trie))
+            response += json.dumps(self.record_store)
+            return response
+        elif request['command'] == 'publish':
+            self.do_store(request['key'], request['value'])
+            return "ok"
+        elif request['command'] == 'reset_dht':
+            pass
+        elif request['command'] == 'dht_store':
+            pass
+        elif request['command'] == 'dht_find_node':
+            response_data += json.dumps(self.find_node(request, query="node"))
+        elif request['command'] == 'dht_find_value':
+            pass
+        else:
+            # TODO raise error
+            return "unknown command"
 
     def find_node(self, stream, request, query=None):
         """
@@ -105,8 +131,8 @@ class Kademlia(object):
             self._add_node(peer)
 
         req_node = request['nodeId']
-        if query == 'value' and req_node in self.store:
-            result = self.store.get(req_node)
+        if query == 'value' and req_node in self.record_store:
+            result = self.record_store.get(req_node)
             return result
         results = self._nearest_nodes(req_node)
         # TODO add signature for UDP response
@@ -119,8 +145,8 @@ class Kademlia(object):
         Returns the value if we have it, or return the k nearest nodes to the node.
         """
         req_id = request['peer_id']
-        if req_id in self.store:
-            results = self.store['req_id']
+        if req_id in self.record_store:
+            results = self.record_store['req_id']
         else:
             results = self._nearest_nodes(req_node)
         # TODO make response with signature
@@ -173,8 +199,8 @@ class Kademlia(object):
 
         if type == 'value':
             # TODO XXX when this inevitably fails, we should send_find_value below
-            if peer_id in self.data_store:
-                return self.data_store[peer_id]
+            if peer_id in self.record_store:
+                return self.record_store[peer_id]
 
         nearest_nodes = []
         for node in self._nearest_nodes(peer_id):
@@ -265,20 +291,15 @@ class Kademlia(object):
         value: Value to store. Should be a timestamped and signed message
         """
         # Look up nearest nodes to ID.
-        nearest_nodes = kademlia_do_lookup(key_id)
+        nearest_peers = self.do_lookup(key_id)
         # Sends signed store request to each node
         store_request = {'type': 'kademlia_publish',
                          'payload': {'key': key_id, 'value': value}}
-        for node in nearest_nodes:
-            if node['peer_id'] in connections:
-                conn = connections[node['peer_id']]
-                send_request_sync(conn, store_request)
-                # TODO check result
-            else:
-                # TODO need to send udp message and wait for response, getting handshake cookie if necessary
-                # Alternatively, connect to node with TCP and send them the STORE as normal
-                log("Tried to send STORE to unconnected node")
-                pass
+        for peer_record in nearest_peers:
+            peer = self.library.identity.add_or_get_peer(peer_record['peer_id'], peer_record['addrs'])
+            # TODO check for unreliable/fast channel
+            peer.send_request_sync(self.get_service_id(), store_request)
+            # TODO check result
 
     def store(self, stream, request):
         """
@@ -303,8 +324,8 @@ class Kademlia(object):
             peer_pubkey.verify(base64.b64decode(request['value']['sig'].encode('utf-8')),
                                json.dumps(store_request, sort_keys=True).encode('utf-8'),
                                ec.ECDSA(hashes.SHA256()))
-        except:
-            log("received invalid STORE")
+        except Exception as e:
+            log("received invalid STORE %s" % e)
             log(store_request)
             log(peer_pubbits)
             return
@@ -315,15 +336,12 @@ class Kademlia(object):
 
         key = store_request['hash']
         value = store_request
-        if key not in self.store:
-            self.store[key] = []
-        self.store[key].append(store_request)
+        if key not in self.record_store:
+            self.record_store[key] = []
+        self.record_store[key].append(store_request)
 
-        # TODO clean this up and make it way fducking easier later
-        response_obj = copy(stream['header'])
-        response_obj['data'] = {'payload': True}
-        response_obj['closeStream'] = True
-        send_message(stream['conn'], response_obj)
+        response = {'payload': True}
+        stream.send_message(response, close=True)
 
     def _nearest_bucket(self, n):
         # Returns the index of the most significant bit in the bytestring

@@ -12,7 +12,7 @@ import gevent
 
 import keygen
 import services.libbiblion
-import json_rpc
+from client_api.json_rpc import start_json_rpc, shutdown_json_rpc
 from biblion.identity import Identity
 from biblion.library import Library
 from log import log
@@ -26,7 +26,7 @@ def async_suicide():
 
 def signal_handler(signal, frame):
         log('Shutting down...')
-        gevent.spawn(json_rpc.shutdown_json_rpc)
+        gevent.spawn(shutdown_json_rpc)
         # XXX need to call shutdown on each transport
         #gevent.spawn(libbiblion.shutdown_sockets)
         gevent.spawn(identity.shutdown)
@@ -72,7 +72,7 @@ log("Starting. Our peer_id: %s" % own_id)
 
 # *~*~* Start listening for messages *~*~*
 identity.setup_transports()
-gevent.spawn(json_rpc.start_json_rpc, port+1)
+gevent.spawn(start_json_rpc, port+1, identity)
 
 # *~*~* Initialize global library *~*~*
 global_library_spec = {

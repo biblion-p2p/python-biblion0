@@ -109,15 +109,12 @@ class Biblion(object):
             if False and f.get('isTorrent'):
                 # TODO XXX need to enable torrent downloads later
                 for piece in request['pieces']:
-                    if have_data(piece):
+                    if self.library.identity.data_store.have_data(piece):
                         pass
             else:
-                if have_data(f):
+                if self.library.identity.data_store.have_data(f):
                     result['have'].append(f)
 
         response = {'type': 'query_pieces',
                     'payload': result}
-        response_obj = copy(stream['header'])
-        response_obj['data'] = response
-        response_obj['closeStream'] = True
-        send_message(stream['conn'], response_obj)
+        stream.send_message(response, close=True)

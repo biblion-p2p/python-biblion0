@@ -1,4 +1,5 @@
 import shutil
+import base64
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
@@ -19,10 +20,12 @@ class DataStore(object):
         self.data_store[hash] = True
 
     def read_file(self, hash):
-        if self.have_data(hash):
+        if not self.have_data(hash):
             # TODO return a useful exception
+            log("Missing that data")
             raise
-        return open("%s%s"%(path,hash)).read()
+        hex_hash = base64.b64decode(hash).hex()
+        return open("%s%s"%(self.path,hex_hash)).read()
 
     def process_file(self, file_path):
         f = open(file_path, 'rb')
@@ -30,7 +33,8 @@ class DataStore(object):
         length = len(data)
         digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
         digest.update(data)
-        hash = digest.finalize().hex()
-        shutil.copyfile(file_path, path + hash)
-        self.add_piece_record(hash, length)
-        return hash
+        raw_hash = digest.finalize()
+        b64hash = base64.b64encode(raw_hash).decode('utf-8')
+        shutil.copyfile(file_path, self.path + raw_hash.hex())
+        self.add_piece_record(b64hash, length)
+        return b64hash

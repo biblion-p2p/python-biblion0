@@ -13,6 +13,9 @@ class KTrie(object):
         #self.state = KTrieNode(dict(), None, 0)
         self.state = {'children': {}, 'leaf': None, 'count': 0}
 
+    def __str__(self):
+        return str(self.state)
+
     def remove_node(self, peer_id_bin):
         # Remove a node from the trie
 
