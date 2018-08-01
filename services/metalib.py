@@ -2,8 +2,13 @@ class MetaLib(object):
     """
     Library administration service
     """
+    def __init__(self):
+        pass
 
-    def handle_request(request):
+    def start(self):
+        pass
+
+    def handle_message(self, stream):
         mt = request['type']
         elif mt == 'request_join':
             pass
@@ -11,3 +16,6 @@ class MetaLib(object):
             pass
         elif mt == 'submit_edit':
             pass
+
+    def handle_rpc(self):
+        pass

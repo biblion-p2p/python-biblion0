@@ -8,7 +8,11 @@ class Gossip(object):
 
         pass
 
-    def handle_request(self, request):
+    def handle_rpc(self, request):
+        pass
+
+    def handle_message(self, stream):
         # TODO check if state matches what's in the request
         # If so, do nothing.
         # If not,
+        pass
