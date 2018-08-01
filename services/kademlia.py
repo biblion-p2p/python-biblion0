@@ -1,12 +1,14 @@
 import base64
 import json
 import time
+from datetime import datetime
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization, hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 
 from services._ktrie import KTrie
+from biblion.peer import JSONRPC
 
 from log import log
 
@@ -84,14 +86,15 @@ class Kademlia(object):
         self.do_random_walk()
 
     def handle_message(self, stream):
-        message = stream.data.pop()
+        rpc_context = JSONRPC(stream.peer, stream)
+        message = rpc_context.get_request()
         mt = message['type']
         if mt == 'kademlia_find_node':
-            self.find_node(stream, message['payload'], query="node")
+            self.find_node(rpc_context, message['payload'], query="node")
         elif mt == 'kademlia_find_value':
-            self.find_node(stream, message['payload'], query="value")
+            self.find_node(rpc_context, message['payload'], query="value")
         elif mt == 'kademlia_publish':
-            self.store(stream, message['payload'])
+            self.store(rpc_context, message['payload'])
 
     def handle_rpc(self, request):
         if request['command'] == 'log_dht':
@@ -115,7 +118,7 @@ class Kademlia(object):
             # TODO raise error
             return "unknown command"
 
-    def find_node(self, stream, request, query=None):
+    def find_node(self, rpc_context, request, query=None):
         """
         Finds the k nearest nodes in our kademlia database
         If we have less than k nodes, we return all of them
@@ -125,7 +128,7 @@ class Kademlia(object):
             log("FIND query should specify NODE or VALUE")
             return
 
-        peer = stream.peer
+        peer = rpc_context.peer
         if request['sender']:
             peer.add_addresses(request['sender'])
             self._add_node(peer)
@@ -137,19 +140,7 @@ class Kademlia(object):
         results = self._nearest_nodes(req_node)
         # TODO add signature for UDP response
 
-        stream.send_message({'payload': results}, close=True)
-        return results
-
-    def find_value(self, request):
-        """
-        Returns the value if we have it, or return the k nearest nodes to the node.
-        """
-        req_id = request['peer_id']
-        if req_id in self.record_store:
-            results = self.record_store['req_id']
-        else:
-            results = self._nearest_nodes(req_node)
-        # TODO make response with signature
+        rpc_context.send_response({'payload': results})
         return results
 
     def _ping(self):
@@ -164,7 +155,7 @@ class Kademlia(object):
         # the protocol using ProtoRoute. This let's us do 0RTT kademlia requests
         # to known nodes.
         if peer.has_protocols():
-            peer.send_request_sync(blah)
+            rpc_context.send_request_sync(blah)
         else:
             wrapper = ProtoRoute(blah)
             peer.send_message(wrapper)
@@ -175,7 +166,9 @@ class Kademlia(object):
                            'sender': self.library.identity.collect_addresses()}}
         log("Sending FIND_NODE to %s" % recipient_peer_id)
         peer = self.library.identity.add_or_get_peer(recipient_peer_id)
-        return peer.send_request_sync(self.get_service_id(), msg)[0]['payload']
+        rpc_context = JSONRPC(peer)
+        res = rpc_context.send_request_sync(self.get_service_id(), msg)
+        return res['payload']
         if False:
             # TODO this is old code. Need to request unreliable channel instead
             # Then the above code will continue to work, but over UDP (or QUIC-unreliable)
@@ -284,6 +277,17 @@ class Kademlia(object):
             rand_id = generate_random_value_for_bucket(i)
             self.do_lookup(rand_id)
 
+    def announce(self, key, value):
+        message = {
+            'hash': key,
+            'pubbits': self.library.identity.get_public_bits().decode('utf-8'),
+            'addrs': value,
+            'time': round(datetime.utcnow().timestamp())
+        }
+        signature = self.library.identity.sign(json.dumps(message, sort_keys=True).encode('utf-8'))
+        signed_message = {'message': message, 'sig': base64.b64encode(signature).decode('utf-8')}
+        log("Processed file %s\n" % signed_message)
+        self.do_store(key, signed_message)
 
     def do_store(self, key_id, value):
         """
@@ -298,10 +302,11 @@ class Kademlia(object):
         for peer_record in nearest_peers:
             peer = self.library.identity.add_or_get_peer(peer_record['peer_id'], peer_record['addrs'])
             # TODO check for unreliable/fast channel
-            peer.send_request_sync(self.get_service_id(), store_request)
+            rpc_context = JSONRPC(peer)
+            rpc_context.send_request_sync(self.get_service_id(), store_request)
             # TODO check result
 
-    def store(self, stream, request):
+    def store(self, rpc_context, request):
         """
         Announcements will have to signed and timestamped. This way we can filter out
         outdated information in a reliable verifiable way, and ensure that announcements
@@ -340,8 +345,7 @@ class Kademlia(object):
             self.record_store[key] = []
         self.record_store[key].append(store_request)
 
-        response = {'payload': True}
-        stream.send_message(response, close=True)
+        rpc_context.send_response({'payload': True})
 
     def _nearest_bucket(self, n):
         # Returns the index of the most significant bit in the bytestring

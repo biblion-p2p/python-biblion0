@@ -6,6 +6,7 @@ import struct
 
 import gevent
 from gevent.event import Event
+from gevent.lock import RLock
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization, hashes
@@ -32,13 +33,14 @@ class TCPMuxed(object):
         self._is_connecting = {}
         self._connections = {}
         self._active_streams = {}
+        self._write_lock = RLock()
 
     def _sym_decrypt(self, message, key):
         aesgcm = AESGCM(key)
         return aesgcm.decrypt(b'\x01', message, None)
 
     def _sym_encrypt(self, message, key):
-        # XXX TODO nonce re-use!
+        # XXX TODO nonce re-use! this is useless
         aesgcm = AESGCM(key)
         return aesgcm.encrypt(b'\x01', message, None)
 
@@ -76,30 +78,51 @@ class TCPMuxed(object):
 
     def _stream_router(self, peer_id, message, conn):
         # TODO XXX need to make sure stream ids have correct parity and are not re-used
-
-        message = json.loads(message)
-        log("Received %s" % message)
-        inner_msg = message['data']
-        stream_id = message['streamId']
+        header_len = struct.unpack('I', message[:4])[0]
+        header = json.loads(message[4:4+header_len])
+        inner_msg = message[4+header_len:]
+        stream_id = header['streamId']
+        log("Received header %s" % header)
         if (peer_id, stream_id) in self._active_streams:
             stream = self._active_streams[(peer_id, stream_id)]
             stream.data.append(inner_msg)
             stream.event.set()
         else:  # new stream
             peer = self.identity.add_or_get_peer(peer_id)
-            stream = Stream.from_message(message, self, conn, peer)
+            stream = Stream.from_message(header, self, conn, peer)
             stream.data.append(inner_msg)
-            stream._opened = True
+            stream.opened = True
             self._active_streams[(peer_id, stream_id)] = stream
             self.on_stream(peer_id, stream)
 
-        self._clean_stream(message, peer_id)
+        if header['closeStream']:
+            self._clean_stream(stream)
 
-    def _clean_stream(self, message, peer_id):
-        if message.get('closeStream'):
-            stream_id = message['streamId']
-            self._active_streams[(peer_id, stream_id)].open = False
-            del self._active_streams[(peer_id, stream_id)]
+    def _clean_stream(self, stream):
+        stream_id = stream.stream_id
+        peer_id = stream.peer.peer_id
+        self._active_streams[(peer_id, stream_id)].open = False
+        del self._active_streams[(peer_id, stream_id)]
+
+    def _get_header(self, stream):
+        header = {'serviceId': stream.service_id,
+                  'streamId': stream.stream_id}
+        return header
+
+    def send_message(self, stream, data, close=False):
+        header = self._get_header(stream)
+        if not stream.opened:
+            stream.opened = True
+            header['openStream'] = True
+        header['dataLen'] = len(data)
+        header['closeStream'] = close
+        if close:
+            self._clean_stream(stream)
+        enc_header = json.dumps(header).encode('utf-8')
+        header_length = len(enc_header)
+        encoded_length = struct.pack('I', header_length)
+        data = encoded_length + enc_header + data
+        self.send(stream.connection, data)
 
     def _listen_for_messages(self, conn, peer_id):
         while True:
@@ -110,7 +133,6 @@ class TCPMuxed(object):
                 log("Connection failed. Closing. %s" % e)
                 conn['socket'].close()
                 break
-
 
             self._stream_router(peer_id, message, conn)
 
@@ -194,14 +216,15 @@ class TCPMuxed(object):
         log("Successfully connected to %s" % pub_to_nodeid(node_pubkey))
         return shared_key
 
-    def send_message(self, conn, message):
-        log("Sending %s" % message)
-        self._clean_stream(message, conn['peer_id'])
-        message = json.dumps(message).encode('utf-8')
-        enc_msg = self._encode_message(self._sym_encrypt(message, conn['session_key']))
-        conn['socket'].sendall(enc_msg)
+    def send(self, conn, data):
+        enc_msg = self._encode_message(self._sym_encrypt(data, conn['session_key']))
+        self._write(conn, enc_msg)
 
-    def create_stream(self, peer_id, service_id, library_id=None):
+    def _write(self, conn, data):
+        with self._write_lock:
+            conn['socket'].sendall(data)
+
+    def create_stream(self, peer_id, service_id):
         if not peer_id in self._connections:
             # TODO establish a connection with the given peer.
             # This means we'll need the TCP addresses of the remote peer. Hm, maybe we should pass in a peer reference instead?
@@ -209,7 +232,7 @@ class TCPMuxed(object):
             raise
         peer = self.identity.add_or_get_peer(peer_id)
         conn = self._connections[peer_id]
-        new_stream = Stream(self, conn, service_id, library_id, peer)
+        new_stream = Stream(self, conn, service_id, peer)
         self._active_streams[(peer_id, new_stream.stream_id)] = new_stream
         return new_stream
 

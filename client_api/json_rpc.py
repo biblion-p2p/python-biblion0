@@ -49,16 +49,7 @@ class BiblionRPCRequestHandler(http.server.BaseHTTPRequestHandler):
                     file_hash = identity.data_store.process_file(file_path)
                     # TODO XXX for now this code assumes the default global identity
                     # publish to DHT
-                    message = {
-                        'hash': file_hash,
-                        'pubbits': identity.get_public_bits().decode('utf-8'),
-                        'addrs': identity.collect_addresses(),
-                        'time': round(datetime.utcnow().timestamp())
-                    }
-                    signature = identity.sign(json.dumps(message, sort_keys=True).encode('utf-8'))
-                    signed_message = {'message': message, 'sig': base64.b64encode(signature).decode('utf-8')}
-                    log("Processed file %s\n" % signed_message)
-                    identity.services.get_service('_global.kademlia').do_store(file_hash, signed_message)
+                    identity.services.get_service('_global.kademlia').announce(file_hash, identity.collect_addresses())
                     response_data += "Added and announced as %s\n" % file_hash
                 elif parsed_data['command'] == 'add_file_to_library':
                     # create metadata record

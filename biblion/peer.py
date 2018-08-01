@@ -10,14 +10,41 @@ from gevent.event import Event
 
 from log import log
 
-class WrappedStream(object):
-    # XXX unused so far...
-    def __init__(self, stream):
-        self.stream = stream
+class JSONRPC(object):
+    def __init__(self, peer, stream=None):
+        self.peer = peer
+        if stream:
+            self.stream = stream
+
+    def send_request_sync(self, service_id, request):
+        # Sends a request and waits for a response from the remote peer.
+        # Create a stream context with a protocol and library information
+        # These will be used to initialize the stream
+        # Send the request in the first packets.
+        # Await the response from the other side.
+        enc_request = json.dumps(request).encode('utf-8')
+        log("Sending JSON request: %s" % enc_request)
+        stream = self.peer.send_message(service_id, enc_request)
+        while stream.open:
+            stream.event.wait()
+            stream.event.clear()
+        resp = stream.data.pop()
+        log("Received JSON response: %s" % resp)
+        return json.loads(resp)
 
     def send_response(self, message):
         # Sends an object over the stream and closes the stream.
-        self.stream.send
+        resp = json.dumps(message).encode('utf-8')
+        log("Sending JSON response %s" % resp)
+        self.stream.write(resp, close=True)
+
+    def get_request(self):
+        if not self.stream:
+            raise
+        req = self.stream.data.pop()
+        req = json.loads(req)
+        log("Received JSON request: %s" % req)
+        return req
 
 class Peer(object):
     """
@@ -42,33 +69,13 @@ class Peer(object):
         #  "connection" from connection oriented transports
         pass
 
-    def send_request(self):
-        # Sends a request asynchronously
-        pass
-
-    def send_message(self):
-        # Send a lone message. Useful for notifications
-        pass
-
-    def send_request_sync(self, service_id, request):
-        # Sends a request and waits for a response from the remote peer.
-        # Create a stream context with a protocol and library information
-        # These will be used to initialize the stream
-        # Send the request in the first packets.
-        # Await the response from the other side.
-
-        # TODO XXX applications should be able to request channel type
-        #conn = self.connections[0]
-
-        # XXX this is hard coded and should be removed
-        conn = self.identity.transports['tcp']
-
-        stream = conn.create_stream(self.peer_id, service_id, 0)  # , library)
-        stream.send_message(request)
-        while stream.open:
-            stream.event.wait()
-            stream.event.clear()
-        return stream.data
+    def send_message(self, service_id, message, close=False):
+        # Sends a message to the service on the remote peer. Opens a new stream.
+        # XXX this transport is hard coded and should be removed
+        transport = self.identity.transports['tcp']
+        stream = transport.create_stream(self.peer_id, service_id)
+        stream.write(message, close)
+        return stream
 
     def on_ready(self):
         # need to figure out when to call "hello"

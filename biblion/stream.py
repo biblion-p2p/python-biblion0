@@ -1,4 +1,8 @@
+import json
+
 from gevent.event import Event
+
+from log import log
 
 class Stream(object):
     """
@@ -12,18 +16,17 @@ class Stream(object):
 
     # TODO Streams should have expiration time
 
-    def __init__(self, transport, connection, service_id, library_id, peer, stream_id=None):
+    def __init__(self, transport, connection, service_id, peer, stream_id=None):
         self.transport = transport
         self.connection = connection
         self.service_id = service_id
-        self.library_id = library_id
         self.peer = peer
         if not stream_id:
             stream_id = connection['next_stream_id']
             connection['next_stream_id'] += 2
         self.stream_id = stream_id
 
-        self._opened = False
+        self.opened = False
         self.data = []
         self.open = True
         self.event = Event()
@@ -36,35 +39,20 @@ class Stream(object):
         return Stream(transport,
                       connection,
                       stream['serviceId'],
-                      stream.get('libraryId'),
                       peer,
                       stream['streamId'])
 
-    def _get_header(self):
-        header = {'serviceId': self.service_id,
-                  'streamId': self.stream_id}
-        if self.library_id:
-            header['libraryId'] = self.library_id
-        return header
+    def write(self, data, close=False):
+        self.transport.send_message(self, data, close)
 
-    def build_stream_header_from_message(self, message):
-        return self.build_stream_header(message['serviceId'],
-                                        message['streamId'],
-                                        message.get('libraryId'))
+    def close(self):
+        # Mark the stream as closed.
+        self.transport.send_message(data=None, close=True)
 
-    def send_message(self, data, close=False):
-        message = self._get_header()
-        if not self._opened:
-            self._opened = True
-            message['openStream'] = True
-        message['data'] = data
-        message['closeStream'] = close
-        self.transport.send_message(self.connection, message)
-
-    def read_message(self):
+    def read(self):
         # XXX don't use this yet... need a better way to manage the Event
         self.event.wait()
-        return self.data[0]
+        return self.data.pop(12345)
 
     def is_alive(self):
         # TODO return false if not. Used to check if underlying connection failed

@@ -12,12 +12,8 @@ from copy import copy
 import gevent
 from gevent.event import Event
 
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import serialization, hashes
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-
 from log import log
+from biblion.peer import JSONRPC
 
 class Biblion(object):
     def __init__(self, library):
@@ -41,32 +37,27 @@ class Biblion(object):
         message signaling handled per application.
         """
 
-        message = stream.data.pop()
+        rpc_context = JSONRPC(stream.peer, stream)
+        message = rpc_context.get_request()
         mt = message['type']
 
-        log("Received message %s, %s" % (stream, message))
-
         if mt == 'hello':
-            self.handle_hello(stream, message['payload'])
+            self.handle_hello(rpc_context, message['payload'])
         elif mt == 'query_pieces':
             # Request a range of pieces
             # should implement dynamic choke algorithm
             # check out libtorrent. they have a good one for seeding that prefers peers who just started or who are about to finish
             #https://github.com/arvidn/libtorrent/blob/master/src/choker.cpp
-            self.query_pieces(stream, message['payload'])
-        elif mt == 'lynx_send_transaction':
-            #
+            self.query_pieces(rpc_context, message['payload'])
+        elif mt == 'send_transaction':
+            # Should be in blockchain
             pass
-        elif mt == 'biblion_sync_blockchain':
+        elif mt == 'sync_blockchain':
             # Return what the most recent block number is
+            # Should be in gossip...
             pass
-        elif mt == 'biblion_query_price':
-            # should specify what we have in a request.
-            # response should in include what they have and if they accept our proposal.
-            pass
-        elif mt == 'biblion_announce_block':
-            pass
-        elif mt == 'biblion_send_transaction':
+        elif mt == 'announce_block':
+            # Should be in gossip or blockchain. not sure yet
             pass
 
     def hello(self, identity, peer_info):
@@ -84,26 +75,25 @@ class Biblion(object):
                        'libraries': peer.identity.collect_protocols()
                    }}
 
-        response = peer.send_request_sync(self.get_service_id(), message)
-        response = response[0]['payload']
-        log("got HELLO response")
-
+        rpc_context = JSONRPC(peer)
+        response = rpc_context.send_request_sync(self.get_service_id(), message)
+        response = response['payload']
         # TODO process library memberships in response or something
         #peer.addresses = response['addrs']
 
-    def handle_hello(self, stream, request):
+    def handle_hello(self, rpc_context, request):
         # record libraries and services provided by node
-        log("Handling HELLO")
+        log("Handling Hello")
 
         # TODO update the addresses of the peer
         #stream.peer.addrs = request['addrs']
         response = {'type': 'hello',
-                    'payload': {'addrs': stream.transport.identity.collect_addresses(),
-                                'libraries': stream.transport.identity.collect_protocols()}}
+                    'payload': {'addrs': self.library.identity.collect_addresses(),
+                                'libraries': self.library.identity.collect_protocols()}}
 
-        stream.send_message(response, close=True)
+        rpc_context.send_response(response)
 
-    def query_pieces(self, stream, request):
+    def query_pieces(self, rpc_context, request):
         result = {'have': [], 'price': 0}
         for f in request['files']:
             if False and f.get('isTorrent'):
@@ -117,4 +107,4 @@ class Biblion(object):
 
         response = {'type': 'query_pieces',
                     'payload': result}
-        stream.send_message(response, close=True)
+        rpc_context.send_response(response)
