@@ -40,9 +40,18 @@ class Library(object):
                 downloaders.append(BitTorrent)
             elif downloader == 'simple':
                 downloaders.append(SimpleDownload)
-            # TODO cdn, erasure coding, coordination, etc
+        # TODO cdn, erasure coding, coordination, etc
 
         return Library(identity, name, owner, routers, downloaders)
+
+    def start(self):
+        # Announces all available items to routing layers
+        # Later, this should handle registering with an admin for coordination data as needed
+        files = seld.identity.data_store.get_items(library=self)
+        for f in files:
+            for r in self.routers:
+                # XXX this won't work since the service is just a class, not an object
+                r.announce(f)
 
     def get_services(self):
         return self.routers + self.downloaders + self.other

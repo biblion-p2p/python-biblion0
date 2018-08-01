@@ -94,7 +94,7 @@ class Biblion(object):
         rpc_context.send_response(response)
 
     def query_pieces(self, rpc_context, request):
-        result = {'have': [], 'price': 0}
+        result = {'have': [], 'lengths': {}, 'price': 0}
         for f in request['files']:
             if False and f.get('isTorrent'):
                 # TODO XXX need to enable torrent downloads later
@@ -104,6 +104,7 @@ class Biblion(object):
             else:
                 if self.library.identity.data_store.have_data(f):
                     result['have'].append(f)
+                    result['lengths'][f] = self.library.identity.data_store.data_store[f]
 
         response = {'type': 'query_pieces',
                     'payload': result}

@@ -4,9 +4,51 @@ import base64
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes
 
+from biblion.peer import JSONRPC
 from crypto_util import public_bits_to_peer_id
 
 from log import log
+
+def do_fetch_pseudo(fetch_data):
+    """
+    Locate peers with the file using the library's routers,
+    Then initialize the downloader to connect to those peers
+    """
+    library = fetch_data.library
+    file_id = fetch_data.file_id
+    for router in library.routers:
+        peers = router.get_peers(file_id)
+        if peers:
+            break
+    else:
+        log("Unable to find peers for download")
+        raise
+
+    for downloader in library.downloaders:
+        downloader.do_download_pseudo(file_id, peers)
+
+def do_download_pseudo(file_id, peers):
+    """
+    This code should be in the downloader. Connect to the given
+    peers and try to download the file_id. Checks for authorization
+    using the library's configured scheme. If authorization is possible
+    and expected, we continue. If authorization is impossible or has unexpected
+    pricing, etc, then we need to bubble up an error to the user.
+
+    The authorization check can be interactive, if it means the user can confirm
+    a dynamic price, or whatever.
+    """
+    for peer in peers:  # concurrent on ~10 peers
+        file_record = peer.query_file(file_id)
+        if not file_record.have:
+            peers.remove(peer)
+            continue
+        if library.authorization_scheme:
+            # check if we can download file
+            # if result is unexpected, bubble error up to user
+            auth_context = blah
+    good_peers.start_download(auth_context)
+
 
 def do_fetch(identity, fetch_data):
     if fetch_data.get('is_library') and library['has_custom_routing']:
@@ -25,7 +67,8 @@ def do_fetch(identity, fetch_data):
         # TODO XXX we should have a pluggable api for choosing the best peer out of the ones we connect to. Maybe based on ping or pricing?
         piece_query = {'type': 'query_pieces',
                        'payload': {'files': [fetch_data['id']]}}
-        res = peer.send_request_sync('_global.biblion', piece_query)[0]['payload']
+        rpc_context = JSONRPC(peer)
+        res = rpc_context.send_request_sync('_global.biblion', piece_query)['payload']
         if res['have']:
             log("Peer has data: %s" % res)
             price = res['price']
@@ -37,26 +80,12 @@ def do_fetch(identity, fetch_data):
                 # call into torrent library
                 pass
             else:
-                preq = {'type': 'download',
-                        'payload': {'id': fetch_data['id']}}
-                pres = peer.send_request_sync('_global.simpledownload', preq)[0]['payload']
-
-                digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
-                digest.update(pres['data'].encode('utf-8'))
-                raw_hash = digest.finalize()
-                b64_hash = base64.b64encode(raw_hash).decode('utf-8')
-
-                if b64_hash != fetch_data['id']:
-                    log("Transferred data was incorrect!")
-                    log(b64_hash)
-                    raise
-
-                tmpfile = open('/tmp/bibtemp', 'w')
-                tmpfile.write(pres['data'])
-                tmpfile.close()
-
-                identity.data_store.process_file('/tmp/bibtemp')
-                # TODO XXX need to make sure we also announce to DHT. See above as well, for torrent downloads
+                # TODO choose the appropriate data service for library
+                download_service = identity.services.get_service('_global.simpledownload')
+                file_length = res['lengths'][fetch_data['id']]
+                download_service.handle_rpc({'command': 'download', 'file': fetch_data['id'], 'length': file_length, 'peer_id': peer.peer_id})
+                # TODO verify that file was download correctly
+                return
         else:
             # mark the node as unneeded. it can be pruned or kept active for gossip, etc
             # should send goaway if truly unneeded

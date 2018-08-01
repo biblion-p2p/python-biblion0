@@ -30,7 +30,7 @@ class Identity(object):
         self.libraries = {}
         self.transports = {}
         self.peers = {}
-        self.data_store = DataStore("data/pieces")
+        self.data_store = DataStore("data/pieces/")
         self.services = ServiceManager(self)
 
     def setup_transports(self):

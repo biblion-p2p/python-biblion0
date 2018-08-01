@@ -26,9 +26,9 @@ class JSONRPC(object):
         log("Sending JSON request: %s" % enc_request)
         stream = self.peer.send_message(service_id, enc_request)
         while stream.open:
-            stream.event.wait()
             stream.event.clear()
-        resp = stream.data.pop()
+            stream.event.wait()
+        resp = stream.read()
         log("Received JSON response: %s" % resp)
         return json.loads(resp)
 
@@ -41,7 +41,7 @@ class JSONRPC(object):
     def get_request(self):
         if not self.stream:
             raise
-        req = self.stream.data.pop()
+        req = self.stream.read()
         req = json.loads(req)
         log("Received JSON request: %s" % req)
         return req

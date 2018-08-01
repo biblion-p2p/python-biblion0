@@ -17,6 +17,7 @@ from biblion.stream import Stream
 from crypto_util import *
 from log import log
 
+CHUNK_SIZE = 1024*10
 
 class TCPMuxed(object):
     """
@@ -54,7 +55,8 @@ class TCPMuxed(object):
     def _recv_message(self, sock):
         encoded_length = sock.recv(4)
         length = struct.unpack('I', encoded_length)[0]
-        return sock.recv(length)
+        msg = sock.recv(length)
+        return msg
 
     def _new_connection(self, connected_socket, peer_id, session_key, is_listener):
         new_conn = {
@@ -82,15 +84,18 @@ class TCPMuxed(object):
         header = json.loads(message[4:4+header_len])
         inner_msg = message[4+header_len:]
         stream_id = header['streamId']
-        log("Received header %s" % header)
+        #log("Received header %s" % header)
         if (peer_id, stream_id) in self._active_streams:
             stream = self._active_streams[(peer_id, stream_id)]
-            stream.data.append(inner_msg)
+            # TODO XXX there is no backpressure here. If the stream reader is
+            # stuck, stream.data will grow out of control, eating all our memory
+            stream.data += inner_msg
             stream.event.set()
         else:  # new stream
             peer = self.identity.add_or_get_peer(peer_id)
             stream = Stream.from_message(header, self, conn, peer)
-            stream.data.append(inner_msg)
+            stream.data += inner_msg
+            stream.event.set()
             stream.opened = True
             self._active_streams[(peer_id, stream_id)] = stream
             self.on_stream(peer_id, stream)
@@ -109,7 +114,22 @@ class TCPMuxed(object):
                   'streamId': stream.stream_id}
         return header
 
+    def _send_message_chunked(self, stream, data, close=False):
+        log("Chunking...")
+        running_total = 0
+        total_length = len(data)
+        while running_total < len(data):
+            data_piece = data[total:running_total+CHUNK_SIZE]
+            if close and running_total+CHUNK_SIZE >= len(data):
+                self.send_message(conn, stream, data_piece, close)
+            else:
+                self.send_message(conn, stream, data_piece)
+            running_total += CHUNK_SIZE
+
     def send_message(self, stream, data, close=False):
+        if len(data) > CHUNK_SIZE:
+            self._send_message_chunked(stream, data, close=close)
+            return
         header = self._get_header(stream)
         if not stream.opened:
             stream.opened = True
@@ -122,7 +142,7 @@ class TCPMuxed(object):
         header_length = len(enc_header)
         encoded_length = struct.pack('I', header_length)
         data = encoded_length + enc_header + data
-        self.send(stream.connection, data)
+        self._write(stream.connection, data)
 
     def _listen_for_messages(self, conn, peer_id):
         while True:
@@ -135,6 +155,7 @@ class TCPMuxed(object):
                 break
 
             self._stream_router(peer_id, message, conn)
+            gevent.sleep(0)  # yield
 
     def _handshake_listener(self, client_socket):
         """
@@ -216,13 +237,11 @@ class TCPMuxed(object):
         log("Successfully connected to %s" % pub_to_nodeid(node_pubkey))
         return shared_key
 
-    def send(self, conn, data):
-        enc_msg = self._encode_message(self._sym_encrypt(data, conn['session_key']))
-        self._write(conn, enc_msg)
-
     def _write(self, conn, data):
         with self._write_lock:
+            data = self._encode_message(self._sym_encrypt(data, conn['session_key']))
             conn['socket'].sendall(data)
+        gevent.sleep(0)
 
     def create_stream(self, peer_id, service_id):
         if not peer_id in self._connections:

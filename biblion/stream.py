@@ -1,4 +1,5 @@
 import json
+from copy import copy
 
 from gevent.event import Event
 
@@ -27,7 +28,7 @@ class Stream(object):
         self.stream_id = stream_id
 
         self.opened = False
-        self.data = []
+        self.data = b''
         self.open = True
         self.event = Event()
 
@@ -47,14 +48,11 @@ class Stream(object):
 
     def close(self):
         # Mark the stream as closed.
-        self.transport.send_message(data=None, close=True)
+        self.transport.send_message(self, data=b'', close=True)
 
     def read(self):
-        # XXX don't use this yet... need a better way to manage the Event
         self.event.wait()
-        return self.data.pop(12345)
-
-    def is_alive(self):
-        # TODO return false if not. Used to check if underlying connection failed
-        # Maybe this should be part of read()?
-        pass
+        buf = copy(self.data)
+        self.data = b''
+        self.event.clear()
+        return buf

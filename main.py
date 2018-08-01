@@ -59,6 +59,7 @@ if not os.path.exists("data/"):
     os.mkdir("data")
     os.mkdir("data/keys")
     os.mkdir("data/pieces")
+    os.mkdir("data/pieces/temp")
 
 # *~*~* Load identity *~*~*
 port = 8000 + (node_number * 2)
