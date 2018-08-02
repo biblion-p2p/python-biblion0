@@ -1,5 +1,4 @@
 import json
-from copy import copy
 
 from gevent.event import Event
 
@@ -52,7 +51,7 @@ class Stream(object):
 
     def read(self):
         self.event.wait()
-        buf = copy(self.data)
+        buf = self.data
         self.data = b''
         self.event.clear()
         return buf
