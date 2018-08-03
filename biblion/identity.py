@@ -24,14 +24,18 @@ class Identity(object):
     Each identity listens for connections from other peers.
     """
 
-    def __init__(self, keypair, addresses):
+    def __init__(self, keypair, keylocs, addresses):
         self.public_key, self.private_key = keypair
+        self.keylocs = keylocs
         self.addresses = addresses
         self.libraries = {}
         self.transports = {}
         self.peers = {}
         self.data_store = DataStore("data/pieces/")
         self.services = ServiceManager(self)
+
+    def get_key_locs(self):
+        return self.keylocs
 
     def setup_transports(self):
         ipv4_addrs = self.addresses['ipv4']

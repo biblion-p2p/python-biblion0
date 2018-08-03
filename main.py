@@ -66,7 +66,7 @@ port = 8000 + (node_number * 2)
 # TODO: Support multiple peer identities
 addresses = {'ipv4': {'udp': [('127.0.0.1', port)],
                       'tcp': [('127.0.0.1', port)]}}
-identity = Identity(keygen.get_keys(), addresses)
+identity = Identity(keygen.get_keys(), keygen.get_key_locs(), addresses)
 
 own_id = identity.get_own_id()
 log("Starting. Our peer_id: %s" % own_id)

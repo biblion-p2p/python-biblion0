@@ -6,7 +6,24 @@ class BitTorrent(object):
     def get_name(self):
         return "bittorrent"
 
+    def get_service_id(self):
+        pass
+
     def start(self):
+        pass
+
+    def handle_rpc(self, request):
+        return
+
+    def handle_message(self):
+        pass
+
+    def do_download(self, peers):
+        # Connect to a handful of the peers
+        # maintain state of which pieces are needed
+        # request rare pieces from good peers
+        # implement interest and choking
+        # in the future, add support for authorization tickets
         pass
 
 # just scratch work right now

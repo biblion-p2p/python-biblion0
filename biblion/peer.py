@@ -91,17 +91,21 @@ class Peer(object):
     def handle_new_stream(self, stream):
         gevent.spawn(self.identity.services.route_stream, stream)
 
-    def reserve_channel(self, reliable=True):
+    def reserve_channel(self, channel_features=None):
         """
         This should make an effort to establish a communications channel with
         the remote peer that satisfies the given constraints.
         """
 
+        if channel_features is None:
+            channel_features = ['reliable']
+
         # for transport in self.identity.transports:
-        #     if transport['is_reliable']:
+        #     for feature in channel_features:
+        #
+        #     if transport.transport_info['reliable']:
         #         if not transport.is_ready(peer_id):
-        #             #transport.become_ready(peer)
-        #             transport.connect(peer)
+        #             transport.become_ready(self)
         #             transport.mark_needed()
 
         # XXX Defaulting to TCP for now. We should only connect if we don't already have a channel available

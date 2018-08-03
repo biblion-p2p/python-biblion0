@@ -35,6 +35,8 @@ def get_keys(node_dir=None):
             format=serialization.PublicFormat.SubjectPublicKeyInfo
         )
 
+        # TODO generate x509 certificate
+
         fpriv = open("%s/priv.key" % key_dir, 'wb')
         fpriv.write(serialized_private)
         fpriv.close()
@@ -51,4 +53,9 @@ def get_keys(node_dir=None):
         public_key_data = open("%s/pub.key" % key_dir, 'rb').read()
         public_key = serialization.load_pem_public_key(public_key_data,
                                                        default_backend())
+
     return public_key, private_key
+
+def get_key_locs(node_dir=None):
+    key_dir = "data/keys"
+    return "%s/priv.key" % key_dir, "%s/pub.key" % key_dir, "%s/pub.cer" % key_dir
