@@ -5,5 +5,4 @@ gevent==1.3.5
 greenlet==0.4.13
 idna==2.7
 pycparser==2.18
-pyOpenSSL==18.0.0
 six==1.11.0
